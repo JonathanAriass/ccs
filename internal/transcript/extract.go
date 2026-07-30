@@ -85,6 +85,12 @@ func contentText(raw json.RawMessage) string {
 		}
 		return ""
 	}
+	// NOTE on the type=="text" filter below: it is currently redundant for thinking
+	// blocks specifically, because this struct has no field matching their "thinking"
+	// key, so such a block decodes with Text == "" and contributes nothing either way.
+	// Proven by running both variants. Keep the filter — it is the only thing that
+	// would still exclude a block type that later gains a "text" field, and it states
+	// intent. Do not delete it as dead code.
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`

@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,61 @@ func TestReadRejectsMachinery(t *testing.T) {
 	if got.LastHuman != "the real question" {
 		t.Errorf("LastHuman = %q, want %q", got.LastHuman, "the real question")
 	}
+}
+
+func TestReadRejectsEveryMachineryPrefix(t *testing.T) {
+	// One fixture per prefix, so deleting ANY single entry from machineryPrefixes
+	// reddens the suite. Without this, only three of the eleven were exercised and
+	// the rest could be removed silently — and the visible consequence is the preview
+	// column showing raw command output or a hook injection instead of the human's
+	// question, which reads as "this feature is bad" rather than "this is a bug".
+	//
+	// Each fixture is a single-guard case: origin IS human, not meta, no toolUseResult,
+	// no tool_result block, non-empty text — so the prefix filter is the only thing
+	// that can reject it. The control record below proves the file is readable at all.
+	//
+	// This is a literal copy of machineryPrefixes, NOT a range over the production
+	// variable. Ranging over machineryPrefixes itself was tried first and does not
+	// work: deleting an entry from the production list also deletes that entry's own
+	// t.Run case, so the subtest simply stops existing instead of failing, and the
+	// suite reports PASS with one fewer subtest. Verified by removing
+	// "<local-command-stdout>", "<task-notification>", and "<ide_opened_file>" from
+	// machineryPrefixes in turn with a range-based version of this test still in
+	// place: each time, `go test -run TestReadRejectsEveryMachineryPrefix -v` showed
+	// 10 RUN lines instead of 11 and PASS, with no failure anywhere.
+	wantPrefixes := []string{
+		"<command-name>", "<command-message>", "<command-args>",
+		"<local-command-stdout>", "<local-command-caveat>",
+		"<task-notification>", "<system-reminder>", "<ide_opened_file>",
+		"[Request interrupted", "Caveat: The messages below",
+		"This session is being continued from a previous conversation",
+	}
+	for _, prefix := range wantPrefixes {
+		t.Run(prefix, func(t *testing.T) {
+			p := writeJSONL(t,
+				`{"type":"user","origin":{"kind":"human"},"message":{"content":"the real question"}}`,
+				`{"type":"user","origin":{"kind":"human"},"message":{"content":`+
+					mustJSON(prefix+" trailing content")+`}}`,
+			)
+			got, err := Read(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.LastHuman != "the real question" {
+				t.Errorf("prefix %q not rejected: LastHuman = %q", prefix, got.LastHuman)
+			}
+		})
+	}
+}
+
+// mustJSON encodes s as a JSON string literal, so prefixes containing quotes or
+// brackets (e.g. "[Request interrupted") survive embedding in the fixture.
+func mustJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func TestReadContentShapes(t *testing.T) {
