@@ -80,6 +80,13 @@ func TestReadRejectsEveryMachineryPrefix(t *testing.T) {
 		"[Request interrupted", "Caveat: The messages below",
 		"This session is being continued from a previous conversation",
 	}
+	// Catches the opposite drift: a prefix added to machineryPrefixes with no
+	// matching test case here would otherwise go uncovered silently.
+	if len(wantPrefixes) != len(machineryPrefixes) {
+		t.Fatalf("machineryPrefixes has %d entries, this test covers %d — add the new one here",
+			len(machineryPrefixes), len(wantPrefixes))
+	}
+
 	for _, prefix := range wantPrefixes {
 		t.Run(prefix, func(t *testing.T) {
 			p := writeJSONL(t,
