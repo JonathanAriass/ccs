@@ -88,10 +88,23 @@ func TestIsLive(t *testing.T) {
 		// kill(0, sig) signals the caller's whole process group and kill(-1, sig)
 		// signals everything the user can signal. A truncated registry file with
 		// no pid field unmarshals to 0 and lands here.
-		for _, pid := range []int{0, -1} {
-			if IsLive(Session{PID: pid, ProcStart: actual}) {
-				t.Errorf("pid %d must be rejected", pid)
-			}
+		//
+		// ProcStart is deliberately EMPTY. Measured on macOS 26.5: pid 0 is
+		// kernel_task — a real, live, non-zombie process — so kill(0,0) returns nil
+		// AND the sysctl lookup succeeds (P_stat=2). With a non-empty ProcStart the
+		// timestamp comparison rejects it, so this subtest would pass even with the
+		// guard deleted — testing nothing. With ProcStart empty, IsLive returns early
+		// at `if s.ProcStart == "" { return true }`, leaving the pid guard as the ONLY
+		// thing that can reject pid 0. Delete the guard and this reddens.
+		if IsLive(Session{PID: 0}) {
+			t.Error("pid 0 must be rejected before the signal probe: kill(0, sig) hits the caller's process group")
+		}
+
+		// pid -1 cannot be pinned the same way: kill(-1, 0) also returns nil, but the
+		// sysctl lookup fails with EIO and rejects it regardless of the guard.
+		// Asserted for the behaviour; NOT claimed as coverage of the guard.
+		if IsLive(Session{PID: -1}) {
+			t.Error("pid -1 must be rejected")
 		}
 	})
 }
