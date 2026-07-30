@@ -18,14 +18,39 @@ func TestLoad(t *testing.T) {
 	 "name":"desktop-b4","status":"waiting","statusUpdatedAt":1785322956268}`)
 	write("1601.json", `{"pid":1601,"sessionId":"beef","cwd":"/Users/x","procStart":"Tue Jul  7 07:05:15 2026","status":"busy"}`)
 	write("broken.json", `{not json`)
-	write("notes.txt", `ignored`)
+
+	// Each negative fixture below must be rejected by exactly ONE guard, and must
+	// be VALID JSON so it survives the Unmarshal check and actually reaches that
+	// guard. An earlier version used invalid JSON for these, which meant the parse
+	// error rejected them first and both the pid guard and the suffix filter could
+	// be deleted with the suite still green.
+	write("notes.txt", `{"pid":999,"sessionId":"wrong-extension","cwd":"/tmp"}`) // only the .json filter rejects this
+	write("zeropid.json", `{"pid":0,"sessionId":"zero-pid","cwd":"/tmp"}`)       // only the pid<=0 guard rejects this
+	write("nopid.json", `{"sessionId":"absent-pid","cwd":"/tmp"}`)               // missing pid unmarshals to 0
+	if err := os.Mkdir(filepath.Join(dir, "subdir.json"), 0o755); err != nil {   // only IsDir() rejects this
+		t.Fatal(err)
+	}
 
 	got, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("want 2 sessions (malformed and non-json skipped), got %d", len(got))
+		t.Fatalf("want 2 sessions (malformed, wrong-extension, pid<=0 and dir all skipped), got %d", len(got))
+	}
+
+	// Name each rejection explicitly. The count above would still pass if one guard
+	// over-rejected while another under-rejected, so pin the identities too.
+	for _, s := range got {
+		if s.PID <= 0 {
+			t.Errorf("a session with pid <= 0 leaked through: %+v", s)
+		}
+		switch s.SessionID {
+		case "wrong-extension":
+			t.Error("a non-.json file was loaded — the suffix filter is not doing anything")
+		case "zero-pid", "absent-pid":
+			t.Errorf("pid<=0 session %q was loaded — the pid guard is not doing anything", s.SessionID)
+		}
 	}
 
 	byPID := map[int]Session{}
