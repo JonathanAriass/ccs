@@ -19,15 +19,20 @@ func TestLoad(t *testing.T) {
 	write("1601.json", `{"pid":1601,"sessionId":"beef","cwd":"/Users/x","procStart":"Tue Jul  7 07:05:15 2026","status":"busy"}`)
 	write("broken.json", `{not json`)
 
-	// Each negative fixture below must be rejected by exactly ONE guard, and must
+	// A negative fixture must be rejected by exactly ONE guard, and must
 	// be VALID JSON so it survives the Unmarshal check and actually reaches that
 	// guard. An earlier version used invalid JSON for these, which meant the parse
 	// error rejected them first and both the pid guard and the suffix filter could
-	// be deleted with the suite still green.
+	// be deleted with the suite still green. Where the platform makes a single-guard
+	// fixture impossible, that is called out at the fixture instead of pretending
+	// otherwise.
 	write("notes.txt", `{"pid":999,"sessionId":"wrong-extension","cwd":"/tmp"}`) // only the .json filter rejects this
 	write("zeropid.json", `{"pid":0,"sessionId":"zero-pid","cwd":"/tmp"}`)       // only the pid<=0 guard rejects this
 	write("nopid.json", `{"sessionId":"absent-pid","cwd":"/tmp"}`)               // missing pid unmarshals to 0
-	if err := os.Mkdir(filepath.Join(dir, "subdir.json"), 0o755); err != nil {   // only IsDir() rejects this
+	// A directory named *.json passes the suffix filter, so this fixture reaches
+	// IsDir() — but os.ReadFile on a directory also errors on its own, so IsDir()
+	// and the ReadFile error jointly reject it. No fixture can pin IsDir() alone.
+	if err := os.Mkdir(filepath.Join(dir, "subdir.json"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
