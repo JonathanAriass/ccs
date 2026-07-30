@@ -140,6 +140,29 @@ func TestReadContentShapes(t *testing.T) {
 			t.Errorf("got %q", got.LastHuman)
 		}
 	})
+
+	t.Run("older format REJECTS records that are not typed", func(t *testing.T) {
+		// The reject direction of `human := r.PromptSource == "typed"`, which the
+		// accept-direction test above cannot cover.
+		//
+		// Every other negative fixture in this file carries a non-nil `origin`, so the
+		// `if r.Origin != nil` branch overrides the promptSource result and the bare
+		// comparison never decides anything. Measured: mutating the line to
+		// `human := true` — default-accept for old-format records, the live regression
+		// shape — leaves the ENTIRE suite green without this case.
+		//
+		// Both records below lack `origin` entirely, so promptSource is the only thing
+		// that can reject them. The control record proves the file reads at all.
+		p := writeJSONL(t,
+			`{"type":"user","promptSource":"typed","message":{"content":"the real question"}}`,
+			`{"type":"user","promptSource":"suggested","message":{"content":"a suggestion, not typed"}}`,
+			`{"type":"user","message":{"content":"no promptSource at all"}}`,
+		)
+		got, _ := Read(p)
+		if got.LastHuman != "the real question" {
+			t.Errorf("LastHuman = %q — an old-format non-typed record leaked through", got.LastHuman)
+		}
+	})
 }
 
 func TestReadAssistant(t *testing.T) {
