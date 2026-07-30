@@ -21,6 +21,23 @@ func TestFocusRejectsEmptyTTY(t *testing.T) {
 	}
 }
 
+// TestFocusRejectsPlaceholderTTY covers the OTHER half of the
+// `tty == "" || tty == "??"` guard. Without it, deleting just the "??" arm
+// leaves the entire suite green — ttyName() returns "??" for any non-pty
+// controlling terminal, and while OutermostTTY never surfaces it today (it
+// only ever yields a real ttysNNN or ""), Focus is a public function and must
+// not be one future caller away from shelling out on a placeholder value.
+func TestFocusRejectsPlaceholderTTY(t *testing.T) {
+	start := time.Now()
+	err := Focus("??")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("want ErrNotFound, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Errorf("\"??\" tty must short-circuit, took %v", elapsed)
+	}
+}
+
 // currentTTYForTest returns a tty iTerm2 itself reports as belonging to a live
 // session, or "" if that cannot be determined.
 //
