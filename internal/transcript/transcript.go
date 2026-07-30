@@ -107,3 +107,25 @@ func tailLines(path string, maxRecords int, maxBytes int64) ([]string, error) {
 	// "no preview" only when nothing was extracted.
 	return ring, nil
 }
+
+// readAll returns every line of a transcript. Unlike tailLines this is a full
+// scan, because usage must be summed over the entire session.
+func readAll(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	// The default 64KB buffer fails with "token too long" on real transcripts;
+	// the largest single record observed is 1.28MB.
+	sc.Buffer(make([]byte, 0, 64*1024), MaxBytes)
+	var lines []string
+	for sc.Scan() {
+		if line := sc.Text(); strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	// A scan error still leaves usable lines — callers degrade rather than fail.
+	return lines, nil
+}
