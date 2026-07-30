@@ -2,8 +2,11 @@ package session
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // formatProcStart is the exact rendering the registry uses. These cases are the
@@ -65,6 +68,43 @@ func TestIsLive(t *testing.T) {
 	t.Run("dead PID is rejected", func(t *testing.T) {
 		if IsLive(Session{PID: 999999, ProcStart: actual}) {
 			t.Error("want dead")
+		}
+	})
+
+	t.Run("a zombie is not alive", func(t *testing.T) {
+		// A zombie passes syscall.Kill(pid, 0) — its PID entry still exists and is
+		// signalable — so ONLY the SZOMB check can reject it. This is a single-guard
+		// fixture: pid > 0, ProcStart empty (so the timestamp comparison never runs),
+		// and the signal probe returns nil. Delete the SZOMB check and IsLive returns
+		// true for a dead process.
+		//
+		// Measured on macOS 26.5: the child reaches P_stat == SZOMB on the first or
+		// second poll, ~10ms, and Wait() reaps it cleanly afterwards. This was twice
+		// dismissed as "would require spawning and reaping a child" — it is one
+		// exec.Command, a bounded poll, and a Wait.
+		cmd := exec.Command("/bin/sh", "-c", "exit 0")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start child: %v", err)
+		}
+		pid := cmd.Process.Pid
+		defer cmd.Wait() // reap, so the test leaves no zombie behind
+
+		var sawZombie bool
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+			if err == nil && kp.Proc.P_stat == szomb {
+				sawZombie = true
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !sawZombie {
+			t.Skip("child never observed in SZOMB state within 3s")
+		}
+
+		if IsLive(Session{PID: pid}) {
+			t.Error("a zombie must not count as live: it passes kill(pid,0), so only the SZOMB check rejects it")
 		}
 	})
 
