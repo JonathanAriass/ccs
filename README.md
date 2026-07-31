@@ -45,3 +45,15 @@ select the window/tab/pane whose tty matches the session and bring it to the
 front. On any other terminal app, or if iTerm2 isn't running, this fails
 silently with a status message ("could not focus" / "background session — no
 tab to focus") rather than doing nothing.
+
+## Tests
+
+    go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
+
+**`go test ./...` briefly steals your window focus, so it is not safe to run
+unattended alongside other work.** `TestFocusActuallyMovesFocus` is a genuine
+positive control: it focuses a *different* iTerm2 tab, asserts the frontmost
+session actually changed, and restores your original focus. Every other test in
+that package focuses the already-focused tab, where a Focus that does nothing at
+all still returns "OK" — so this is the only test that proves ⏎ moves anything.
+It stays.

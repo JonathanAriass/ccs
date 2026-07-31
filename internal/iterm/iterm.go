@@ -32,6 +32,28 @@ func Running() bool {
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
+// focusCmd builds the osascript invocation for one tty.
+//
+// It exists as its own function so the WaitDelay below can be asserted. There is
+// no way to observe it from inside Focus, and the failure it guards against —
+// osascript forking a child that inherits the stdout pipe — cannot be provoked
+// on demand, so without this seam the guarantee would be assumed rather than
+// tested. See TestFocusCmdBoundsTheWaitAfterTheDeadline.
+func focusCmd(ctx context.Context, script, tty string) *exec.Cmd {
+	// The tty is passed as argv, never interpolated into the script source.
+	cmd := exec.CommandContext(ctx, "osascript", script, "--", "/dev/"+tty)
+	// WaitDelay is what makes the caller's context deadline structural rather
+	// than assumed. .Output() collects stdout through an os.Pipe, and killing
+	// osascript on the deadline only unblocks Wait if nothing else holds that
+	// pipe's write end — if osascript ever forks a child that inherited it, Wait
+	// blocks on EOF forever and the 5-second context buys nothing. Focus runs
+	// SYNCHRONOUSLY inside Update, on bubbletea's single event-loop goroutine, so
+	// "forever" here means the TUI never accepts another keystroke. WaitDelay
+	// bounds the gap between the process dying and its pipes closing.
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
 // Focus selects the window, tab, and pane owning tty (e.g. "ttys017").
 //
 // The caller must resolve tty FRESH immediately before calling. macOS recycles
@@ -53,8 +75,6 @@ func Focus(tty string) error {
 	if err := os.WriteFile(path, []byte(focusScript), 0o600); err != nil {
 		return err
 	}
-	// Pass the tty as argv, never interpolated into the script source.
-	//
 	// The context deadline is defence in depth. focus.applescript already wraps its
 	// tell block in `with timeout of 3 seconds`, but that bounds Apple Event replies,
 	// not the osascript process itself — and Focus is called SYNCHRONOUSLY from the
@@ -62,7 +82,7 @@ func Focus(tty string) error {
 	// on the one call that can block.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "osascript", path, "--", "/dev/"+tty).Output()
+	out, err := focusCmd(ctx, path, tty).Output()
 	if err != nil {
 		// AppleScript error text is LOCALIZED — this machine returns Spanish.
 		// Never branch on English message text; the exit status is the signal.

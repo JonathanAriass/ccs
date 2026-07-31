@@ -247,6 +247,140 @@ func TestViewTerminalTooSmall(t *testing.T) {
 	}
 }
 
+// busyFrameModel builds a model whose every field is long enough to compete for
+// the width budget, so a width sweep exercises real truncation rather than a
+// frame that happens to be narrow.
+func busyFrameModel(width, height int, status string) Model {
+	m := sizedModel(2, width, height)
+	m.status = status
+	m.views[0] = session.View{
+		Session: session.Session{
+			SessionID:       "sess-a",
+			Name:            "a-fairly-long-session-name",
+			CWD:             "/Users/x/Desktop/okt-api/.claude/worktrees/OKT-18841-detracciones-mx",
+			Status:          "waiting",
+			Version:         "2.1.220",
+			StatusUpdatedAt: 1785322956268,
+		},
+		TTY: "ttys017",
+		// Double-width runes: the row budget is counted in runes, so CJK text
+		// is what turns a "correct" budget into an overflowing line.
+		LastAssistant: strings.Repeat("完了", 40),
+		LastHuman:     strings.Repeat("please do the thing ", 8),
+		HasPreview:    true,
+	}
+	m.views[1] = session.View{
+		Session: session.Session{SessionID: "sess-b", Name: "b", CWD: "/tmp", Status: "idle"},
+	}
+	return m
+}
+
+// TestViewNeverExceedsTerminalWidth sweeps every width the two-pane layout
+// accepts, with and without a status line.
+//
+// DIRECTION: this pins the ACCEPT side, which nothing did before.
+// TestViewTerminalTooSmall pins only the REJECT side — that a width below
+// minTermWidth shows the notice. "We refuse to draw below 40" says nothing
+// about whether what we DO draw at 40 fits on screen, and it did not: the key
+// legend is 52 display columns at full length, so every width in [40, 52)
+// rendered a frame wider than the terminal. lipgloss.JoinVertical pads every
+// block to the widest one, so the damage was not confined to the footer — all
+// eleven body rows were stretched to 52 columns, the terminal wrapped each onto
+// a second line, and an 11-line frame became 22. [40, 52) is exactly what a
+// vertical iTerm2 split or a Neovim :terminal in a side window gives you.
+func TestViewNeverExceedsTerminalWidth(t *testing.T) {
+	for _, status := range []string{"", "could not focus: iterm: no tab owns that tty"} {
+		for w := minTermWidth; w <= 80; w++ {
+			m := busyFrameModel(w, 20, status)
+			frame := m.View()
+
+			// Guard against the assertion below passing vacuously on a frame
+			// that rendered nothing at all.
+			lines := strings.Split(frame, "\n")
+			if len(lines) < 10 {
+				t.Fatalf("width %d (status %q): frame is only %d lines, nothing to measure:\n%s",
+					w, status, len(lines), frame)
+			}
+			if !strings.Contains(visibleText(frame), "Sessions") {
+				t.Fatalf("width %d (status %q): frame has no session list:\n%s", w, status, frame)
+			}
+
+			for i, ln := range lines {
+				if got := lipgloss.Width(ln); got > w {
+					t.Fatalf("width %d (status %q): line %d is %d display columns, want <= %d:\n%q",
+						w, status, i, got, w, visibleText(ln))
+				}
+			}
+		}
+	}
+}
+
+// TestViewLegendElidesGracefullyWhenItDoesNotFit pins help.Model.Width
+// specifically, which the sweep above cannot: ansi.Truncate alone would satisfy
+// every width assertion there by hard-clipping mid-word. The difference the two
+// produce is visible in the last line — bubbles drops whole bindings and marks
+// the cut with "…", a bare ansi.Truncate ends on whatever character fell on the
+// boundary ("… r refre").
+func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
+	m := busyFrameModel(minTermWidth, 20, "")
+	lines := strings.Split(visibleText(m.View()), "\n")
+	legend := strings.TrimRight(lines[len(lines)-1], " ")
+
+	if !strings.HasSuffix(legend, "…") {
+		t.Errorf("at width %d the legend must elide at a binding boundary with an ellipsis, got %q",
+			minTermWidth, legend)
+	}
+	if !strings.Contains(legend, "up") {
+		t.Errorf("the elided legend must still show the first bindings, got %q", legend)
+	}
+}
+
+// TestViewShowsMetadataEvenWithoutAPreview pins the corrected scope of
+// HasPreview: it governs the last EXCHANGE, not the whole pane. Gating the
+// whole pane on it blanked Status, Version, TTY, Tokens and Cost for 4 of 14
+// live sessions — precisely the ones where the tty and the cost are the only
+// information available about them.
+func TestViewShowsMetadataEvenWithoutAPreview(t *testing.T) {
+	m := sizedModel(1, 100, 30)
+	m.views[0] = session.View{
+		Session:    session.Session{Name: "x", Status: "busy", Version: "9.9.9"},
+		TTY:        "ttys042",
+		Tokens:     4242,
+		Cost:       12.34,
+		HasPreview: false,
+	}
+	out := visibleText(m.View())
+	for _, want := range []string{"no preview", "busy", "9.9.9", "ttys042", "4242", "$12.34"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview pane for a session with no exchange must still show %q, got:\n%s", want, out)
+		}
+	}
+}
+
+// TestViewRowShowsAgeFromRegistryMilliseconds pins the CALL SITE of compactAge:
+// formatRow must hand it session.StatusUpdatedTime(), the conversion that knows
+// the registry's unit. Reading the raw int64 as seconds instead lands in the
+// year 58544, every duration underflows, the clock-skew clamp swallows the
+// negative and the column renders "now" for every row on screen.
+func TestViewRowShowsAgeFromRegistryMilliseconds(t *testing.T) {
+	m := sizedModel(1, 100, 30)
+	m.views[0] = session.View{
+		Session: session.Session{
+			Name:            "aged",
+			Status:          "idle",
+			StatusUpdatedAt: time.Now().Add(-3 * time.Hour).UnixMilli(),
+		},
+		TTY: "ttys001",
+	}
+	out := visibleText(m.View())
+	if !strings.Contains(out, "3h") {
+		t.Errorf("the row's age column must render \"3h\" for a session last updated 3 hours ago, got:\n%s", out)
+	}
+	if strings.Contains(out, "now") {
+		t.Errorf("a 3-hour-old session must not render as \"now\" — the age is being read in the wrong unit:\n%s", out)
+	}
+}
+
 func TestViewNotYetSizedRendersEmpty(t *testing.T) {
 	m := New() // width/height still zero — no WindowSizeMsg received yet
 	if got := m.View(); got != "" {

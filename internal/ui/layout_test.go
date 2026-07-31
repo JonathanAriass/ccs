@@ -3,6 +3,8 @@ package ui
 import (
 	"testing"
 	"time"
+
+	"github.com/JonathanAriass/ccs/internal/session"
 )
 
 func TestPaneWidths(t *testing.T) {
@@ -120,26 +122,64 @@ func TestRowWidthsPartitionsExactly(t *testing.T) {
 	}
 }
 
+// TestCompactAge drives every case through session.Session's own
+// StatusUpdatedTime conversion, in MILLISECONDS — the exact path production
+// takes — rather than hand-building a time.Time here.
+//
+// The previous version of this table computed every fixture with .Unix()
+// (seconds). It was fully green while the age column was completely dead:
+// production supplies milliseconds, which read as seconds land in the year
+// 58544, so every duration underflowed, the clock-skew clamp swallowed the
+// negative, and every row on screen rendered "now" — including sessions idle
+// for weeks. A fixture in a unit production never supplies proves nothing about
+// production.
 func TestCompactAge(t *testing.T) {
 	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) int64 { return now.Add(d).UnixMilli() }
 	cases := []struct {
 		name string
-		secs int64
+		ms   int64
 		want string
 	}{
 		{"zero timestamp renders empty", 0, ""},
-		{"30 seconds ago is now", now.Add(-30 * time.Second).Unix(), "now"},
-		{"5 minutes ago", now.Add(-5 * time.Minute).Unix(), "5m"},
-		{"3 hours ago", now.Add(-3 * time.Hour).Unix(), "3h"},
-		{"2 days ago", now.Add(-50 * time.Hour).Unix(), "2d"},
-		{"future timestamp clamps to now, not negative", now.Add(1 * time.Hour).Unix(), "now"},
+		{"30 seconds ago is now", at(-30 * time.Second), "now"},
+		{"5 minutes ago", at(-5 * time.Minute), "5m"},
+		{"3 hours ago", at(-3 * time.Hour), "3h"},
+		{"2 days ago", at(-50 * time.Hour), "2d"},
+		{"future timestamp clamps to now, not negative", at(time.Hour), "now"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := compactAge(c.secs, now); got != c.want {
-				t.Errorf("compactAge(%d) = %q want %q", c.secs, got, c.want)
+			s := session.Session{StatusUpdatedAt: c.ms}
+			if got := compactAge(s.StatusUpdatedTime(), now); got != c.want {
+				t.Errorf("compactAge(%d ms) = %q want %q", c.ms, got, c.want)
 			}
 		})
+	}
+}
+
+// TestCompactAgeOnARealRegistryTimestamp is the regression test for the
+// milliseconds-read-as-seconds bug, and it uses a value copied VERBATIM from a
+// live ~/.claude/sessions entry (the same literal internal/session's TestLoad
+// carries) rather than one derived from time.Now().
+//
+// That is the whole point: any fixture this test computes for itself can be
+// computed in the wrong unit, and then the test agrees with the bug. A real
+// registry value cannot be — it is the input production actually gets.
+func TestCompactAgeOnARealRegistryTimestamp(t *testing.T) {
+	const registryMs int64 = 1785322956268 // "statusUpdatedAt" straight out of a live session file
+	s := session.Session{StatusUpdatedAt: registryMs}
+
+	// Pin the decoded instant first. Read as SECONDS this same number is the
+	// year 58544, so this assertion fails on the exact mutation that caused the
+	// bug — before any duration arithmetic can hide it behind the skew clamp.
+	if y := s.StatusUpdatedTime().UTC().Year(); y != 2026 {
+		t.Fatalf("a real registry timestamp decoded to year %d, want 2026 — it is being read in the wrong unit", y)
+	}
+
+	now := s.StatusUpdatedTime().Add(43 * 24 * time.Hour)
+	if got := compactAge(s.StatusUpdatedTime(), now); got != "43d" {
+		t.Errorf("compactAge(real registry value, 43 days later) = %q, want %q", got, "43d")
 	}
 }
 

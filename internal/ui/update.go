@@ -21,6 +21,62 @@ func clamp(i, n int) int {
 	return i
 }
 
+// reconcile merges a freshly polled list into the one currently on screen,
+// returning the list to display and where the cursor belongs in it.
+//
+// Everything here keys off SessionID rather than list position, because a poll
+// RE-SORTS: sortViews puts "waiting" on top, so a session that starts waiting
+// jumps to index 0 and shifts every session below it down one. Two things have
+// to survive that.
+//
+//   - THE SELECTION. Re-anchoring the cursor by index means the highlight slides
+//     onto whatever session took over that slot. Pressing ⏎ then focuses the
+//     wrong iTerm2 tab — the single action this tool exists to perform. And it
+//     is not a rare race: sessions changing status and floating to the top is
+//     the tool's whole premise, so the bug fires on exactly the events the user
+//     is watching for.
+//
+//   - TOKENS AND COST. Collect deliberately does not compute cost (it is a full
+//     transcript scan), so every polled View arrives with Tokens/Cost zeroed.
+//     Assigning the new slice wholesale therefore threw away whatever the last
+//     costMsg had written, and the preview pane flickered to "$0.00" every two
+//     seconds until the next lookup came back.
+//
+// When the selected session is no longer in the new list — it exited — the
+// cursor falls back to the old index, clamped into range.
+//
+// A View with an empty SessionID has no identity to match on, so it is skipped
+// by both halves rather than silently aliasing every other identity-less view.
+// Load does not require the field, so a malformed registry entry can produce
+// one; test fixtures produce them routinely.
+func reconcile(old, next []session.View, cursor int) ([]session.View, int) {
+	prev := make(map[string]session.View, len(old))
+	for _, v := range old {
+		if v.SessionID != "" {
+			prev[v.SessionID] = v
+		}
+	}
+
+	selID := ""
+	if cursor >= 0 && cursor < len(old) {
+		selID = old[cursor].SessionID
+	}
+
+	found := -1
+	for i := range next {
+		if p, ok := prev[next[i].SessionID]; ok {
+			next[i].Tokens, next[i].Cost = p.Tokens, p.Cost
+		}
+		if selID != "" && next[i].SessionID == selID {
+			found = i
+		}
+	}
+	if found < 0 {
+		found = clamp(cursor, len(next))
+	}
+	return next, found
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -36,10 +92,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.views = msg.views
-		// Sessions exit while the TUI is open, so the cursor can end up past
-		// the end of a shorter list. Clamp rather than panic.
-		m.cursor = clamp(m.cursor, len(m.views))
+		// A transient message (a failed focus) must not outlive the state it
+		// described. Left uncleared it sits there indefinitely AND changes the
+		// frame height for as long as it does.
+		m.status = ""
+		// Carry the selection and the cost figures across the re-sort, and clamp
+		// the cursor when its session has exited. See reconcile.
+		m.views, m.cursor = reconcile(m.views, msg.views, m.cursor)
 		// Refresh the selected row's cost every poll too, not just on cursor
 		// move: a busy session's transcript keeps growing, so its cost should
 		// keep climbing on screen without the user having to nudge the cursor.
@@ -73,6 +132,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		prev := m.cursor
 		m.cursor = clamp(m.cursor-1, len(m.views))
 		if m.cursor != prev {
+			// The status line describes the row it was raised on ("background
+			// session — no tab to focus"). Moving off that row makes it wrong,
+			// so it goes with the selection.
+			m.status = ""
 			return m, m.costCmdForSelected()
 		}
 		return m, nil
@@ -81,6 +144,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		prev := m.cursor
 		m.cursor = clamp(m.cursor+1, len(m.views))
 		if m.cursor != prev {
+			m.status = ""
 			return m, m.costCmdForSelected()
 		}
 		return m, nil

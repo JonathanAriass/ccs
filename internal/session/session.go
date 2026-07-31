@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Session is one entry of the registry.
@@ -26,10 +27,23 @@ type Session struct {
 	Status          string `json:"status"`
 	WaitingFor      string `json:"waitingFor"`
 	ProcStart       string `json:"procStart"`
-	StartedAt       int64  `json:"startedAt"`
-	UpdatedAt       int64  `json:"updatedAt"`
 	StatusUpdatedAt int64  `json:"statusUpdatedAt"`
 }
+
+// StatusUpdatedTime is the last status TRANSITION as a time.Time.
+//
+// The registry writes this field in MILLISECONDS ("statusUpdatedAt":1785329636347
+// in a live entry); keeping the conversion here, next to the json tag, stops
+// callers guessing at the unit. Reading it as `time.Unix(ms, 0)` yields the year
+// 58544, which underflows every duration computed from it — that is exactly the
+// bug that made the list's age column render "now" for EVERY row, because the
+// clock-skew clamp swallowed the negative. Verified live: the registry currently
+// holds sessions last touched 24, 35, 42 and 45 days ago, all showing "now".
+//
+// Nothing else in this struct is a timestamp: startedAt/updatedAt are present in
+// the registry JSON but were parsed and never read, so they were dropped rather
+// than left around inviting the same unit assumption.
+func (s Session) StatusUpdatedTime() time.Time { return time.UnixMilli(s.StatusUpdatedAt) }
 
 // Load parses every *.json in dir. Files that are unreadable or malformed are
 // skipped rather than failing the whole load: sessions exit while we read, and

@@ -90,7 +90,7 @@ func formatRow(v session.View, home string, now time.Time, width int) string {
 	// text — both go through sanitize for the same reason lastMessage does.
 	name := truncateToWidth(sanitize(v.DisplayName()), nameW)
 	dir := elideMiddle(sanitize(homeAbbrev(v.CWD, home)), dirW)
-	age := compactAge(v.StatusUpdatedAt, now)
+	age := compactAge(v.StatusUpdatedTime(), now)
 	msg := truncateToWidth(sanitize(lastMessage(v)), msgW)
 
 	row := fmt.Sprintf("%s %-*s %-*s %*s %s", glyph, nameW, name, dirW, dir, ageWidth, age, msg)
@@ -137,11 +137,29 @@ func (m Model) View() string {
 	preview := m.renderPreview(previewW, paneH)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
 
+	// Both footer lines are hard-clipped to the terminal width.
+	//
+	// The key legend is 52 display columns at full length, but minTermWidth is
+	// 40 — so at every width in [40, 52) an unclamped legend is WIDER than the
+	// screen. lipgloss.JoinVertical below pads every block to the widest one, so
+	// a 52-column footer does not just overflow itself: it stretches EVERY body
+	// row to 52 columns too, each of which the terminal then wraps onto a second
+	// line, doubling the frame's height and garbling the layout. Measured over
+	// widths 40..80: 12 of 41 overflowed, all of them by up to 12 columns, and
+	// all of them in [40, 52). That range is not hypothetical — it is what a
+	// vertical iTerm2 split or a Neovim :terminal in a side window gives you.
+	//
+	// h.Width tells bubbles to elide the legend gracefully (with "…") instead of
+	// dropping bindings, but it is NOT sufficient on its own: its truncation is
+	// approximate and still returned 52 columns at Width = 45. ansi.Truncate,
+	// which clips by real display width, is what actually guarantees the bound.
 	var footer strings.Builder
 	if m.status != "" {
-		footer.WriteString(statusFooter.Render(sanitize(m.status)) + "\n")
+		footer.WriteString(ansi.Truncate(statusFooter.Render(sanitize(m.status)), m.width, "") + "\n")
 	}
-	footer.WriteString(help.New().ShortHelpView(m.keys.ShortHelp()))
+	h := help.New()
+	h.Width = m.width
+	footer.WriteString(ansi.Truncate(h.ShortHelpView(m.keys.ShortHelp()), m.width, ""))
 
 	return lipgloss.JoinVertical(lipgloss.Left, body, footer.String())
 }
@@ -190,13 +208,14 @@ func (m Model) renderPreview(width, height int) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Preview"))
 
-	v := m.selected()
-	switch {
-	case v == nil:
+	if v := m.selected(); v == nil {
 		b.WriteString("\n  (no session selected)")
-	case !v.HasPreview:
-		b.WriteString("\n  no preview")
-	default:
+	} else {
+		// Status/Version/TTY/Tokens/Cost render for EVERY selected session,
+		// including one with no transcript exchange to show. HasPreview scopes
+		// "no preview" to the last exchange only — it used to gate this whole
+		// pane, which blanked the metadata for 4 of 14 live sessions: precisely
+		// the ones where the tty and the cost are the only information there is.
 		b.WriteString("\n" + previewField("Status", v.Status))
 		b.WriteString("\n" + previewField("Version", v.Version))
 		tty := v.TTY
@@ -207,10 +226,14 @@ func (m Model) renderPreview(width, height int) string {
 		b.WriteString("\n\n" + labelStyle.Render("main thread"))
 		b.WriteString("\n" + previewField("Tokens", fmt.Sprintf("%d", v.Tokens)))
 		b.WriteString("\n" + previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)))
-		b.WriteString("\n\n" + labelStyle.Render("Last human:"))
-		b.WriteString("\n" + wrapToWidth(sanitize(v.LastHuman), inner))
-		b.WriteString("\n\n" + labelStyle.Render("Last assistant:"))
-		b.WriteString("\n" + wrapToWidth(sanitize(v.LastAssistant), inner))
+		if !v.HasPreview {
+			b.WriteString("\n\n  no preview")
+		} else {
+			b.WriteString("\n\n" + labelStyle.Render("Last human:"))
+			b.WriteString("\n" + wrapToWidth(sanitize(v.LastHuman), inner))
+			b.WriteString("\n\n" + labelStyle.Render("Last assistant:"))
+			b.WriteString("\n" + wrapToWidth(sanitize(v.LastAssistant), inner))
+		}
 	}
 
 	return previewPane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).

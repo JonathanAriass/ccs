@@ -1,6 +1,7 @@
 package iterm
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"strings"
@@ -35,6 +36,38 @@ func TestFocusRejectsPlaceholderTTY(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Errorf("\"??\" tty must short-circuit, took %v", elapsed)
+	}
+}
+
+// TestFocusCmdBoundsTheWaitAfterTheDeadline pins the WaitDelay.
+//
+// The context deadline alone does not bound Focus. .Output() reads stdout
+// through an os.Pipe; if osascript forked a child that inherited the write end,
+// killing osascript on the deadline would leave cmd.Wait blocked on EOF from a
+// pipe nobody closes. Focus is called synchronously from the TUI's Update, so
+// that is a permanent freeze of the whole UI rather than a slow keypress.
+//
+// That scenario cannot be provoked from a test, so this asserts the field
+// instead: the guarantee has to be structural, and a structural guarantee that
+// nothing checks is one refactor away from being deleted as noise.
+func TestFocusCmdBoundsTheWaitAfterTheDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := focusCmd(ctx, "/nonexistent/focus.applescript", "ttys017")
+
+	if cmd.WaitDelay <= 0 {
+		t.Errorf("cmd.WaitDelay = %v; a context deadline does not bound Wait when a forked child holds the stdout pipe", cmd.WaitDelay)
+	}
+	// Guard the extraction itself: the argv shape is what
+	// TestFocusResolvesArgvPastSeparator depends on.
+	want := []string{"osascript", "/nonexistent/focus.applescript", "--", "/dev/ttys017"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("cmd.Args = %q, want %q", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("cmd.Args[%d] = %q, want %q", i, cmd.Args[i], want[i])
+		}
 	}
 }
 

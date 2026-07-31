@@ -112,17 +112,25 @@ func rowWidths(total int) (name, dir, msg int) {
 	return
 }
 
-// compactAge renders a Session's StatusUpdatedAt (unix seconds) as a short
-// relative age for the list row: "now", "5m", "3h", "2d". A zero timestamp
-// (never set — an older/malformed registry entry) renders as "" rather than
-// a nonsensical multi-decade age. A timestamp in the future (clock skew
-// between the hook that wrote it and this machine) clamps to "now" instead of
-// going negative.
-func compactAge(unixSec int64, now time.Time) string {
-	if unixSec <= 0 {
+// compactAge renders a status-transition instant as a short relative age for
+// the list row: "now", "5m", "3h", "2d".
+//
+// It takes a time.Time, NOT a raw registry integer: the registry stores
+// statusUpdatedAt in milliseconds, and an earlier version of this function took
+// the int64 and read it as seconds, which put every timestamp in the year 58544
+// and made every row render "now". The unit conversion belongs next to the json
+// tag (session.Session.StatusUpdatedTime), so this function cannot be handed a
+// number in the wrong unit at all.
+//
+// A zero timestamp (never set — an older/malformed registry entry) renders as ""
+// rather than a nonsensical multi-decade age. A timestamp in the future (clock
+// skew between the hook that wrote it and this machine) clamps to "now" instead
+// of going negative.
+func compactAge(t, now time.Time) string {
+	if t.UnixMilli() <= 0 {
 		return ""
 	}
-	d := now.Sub(time.Unix(unixSec, 0))
+	d := now.Sub(t)
 	if d < 0 {
 		d = 0
 	}
