@@ -2,12 +2,14 @@
 package iterm
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 //go:embed focus.applescript
@@ -52,7 +54,15 @@ func Focus(tty string) error {
 		return err
 	}
 	// Pass the tty as argv, never interpolated into the script source.
-	out, err := exec.Command("osascript", path, "--", "/dev/"+tty).Output()
+	//
+	// The context deadline is defence in depth. focus.applescript already wraps its
+	// tell block in `with timeout of 3 seconds`, but that bounds Apple Event replies,
+	// not the osascript process itself — and Focus is called SYNCHRONOUSLY from the
+	// TUI's Enter handler, so anything unbounded here freezes the UI. Belt and braces
+	// on the one call that can block.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "osascript", path, "--", "/dev/"+tty).Output()
 	if err != nil {
 		// AppleScript error text is LOCALIZED — this machine returns Spanish.
 		// Never branch on English message text; the exit status is the signal.

@@ -60,6 +60,67 @@ func currentTTYForTest(t *testing.T) string {
 	return strings.TrimPrefix(strings.TrimSpace(string(out)), "/dev/")
 }
 
+// allTTYsForTest lists every tty iTerm2 currently owns, via an independent oracle.
+func allTTYsForTest(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("osascript", "-e",
+		`tell application "iTerm2" to return tty of sessions of tabs of windows`).Output()
+	if err != nil {
+		return nil
+	}
+	var ttys []string
+	for _, f := range strings.Split(string(out), ",") {
+		f = strings.TrimPrefix(strings.TrimSpace(f), "/dev/")
+		if f != "" {
+			ttys = append(ttys, f)
+		}
+	}
+	return ttys
+}
+
+func TestFocusActuallyMovesFocus(t *testing.T) {
+	if !Running() {
+		t.Skip("iTerm2 not running")
+	}
+	// THE test for this package. Everything else proves a tty RESOLVES; this proves
+	// something MOVES.
+	//
+	// Measured: deleting the whole `select w / select tab / select session / activate`
+	// block from focus.applescript leaves every other test in this file GREEN,
+	// because they focus the ALREADY-FOCUSED session — the match branch returns "OK"
+	// whether or not any selection happens. A Focus that is a complete no-op returning
+	// nil passes them all. That is exactly what a user experiences as "Enter does
+	// nothing", which is the one failure this package exists to prevent.
+	//
+	// So: focus a DIFFERENT tty and assert the frontmost session actually changed.
+	before := currentTTYForTest(t)
+	if before == "" {
+		t.Skip("cannot resolve the current tty")
+	}
+	var target string
+	for _, tty := range allTTYsForTest(t) {
+		if tty != before {
+			target = tty
+			break
+		}
+	}
+	if target == "" {
+		t.Skip("only one iTerm2 session — cannot verify movement")
+	}
+
+	if err := Focus(target); err != nil {
+		t.Fatalf("Focus(%q) = %v, want nil", target, err)
+	}
+	// Restore the user's original focus regardless of outcome.
+	defer func() { _ = Focus(before) }()
+
+	after := currentTTYForTest(t)
+	if after != target {
+		t.Errorf("focus did not move: before=%q target=%q after=%q — the select/activate block is inert",
+			before, target, after)
+	}
+}
+
 func TestFocusResolvesArgvPastSeparator(t *testing.T) {
 	if !Running() {
 		t.Skip("iTerm2 not running")
