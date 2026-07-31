@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,8 +192,13 @@ func TestCollectPreview(t *testing.T) {
 
 	t.Run("missing transcript degrades to no preview, not an error", func(t *testing.T) {
 		// The FIRST of the two "no preview" routes: the file is simply absent.
-		// transcript.Read returns an error here, and Collect must degrade rather
-		// than propagate it — pins the `err == nil` guard's reject direction.
+		// This pins Collect's DEGRADE BEHAVIOR when transcript.Read fails: the
+		// View's preview fields must stay at their zero values rather than the
+		// error propagating out of Collect. It does NOT pin the `err == nil`
+		// guard itself — view.go's own COVERAGE NOTE on that guard explains why
+		// no fixture can (Read never returns a populated Summary alongside a
+		// non-nil error, so deleting the guard is behaviorally identical for
+		// every input Read can produce).
 		cwd, sessionID := "/tmp/no-transcript", "sess-missing"
 		registryDir := newRegistry(t, cwd, sessionID)
 		home := t.TempDir() // nothing written under here
@@ -207,8 +213,10 @@ func TestCollectPreview(t *testing.T) {
 	})
 
 	t.Run("existing transcript populates title and preview", func(t *testing.T) {
-		// Pins the `err == nil` guard's accept direction: a real transcript must
-		// actually flow through into the View's fields.
+		// Pins Collect's POPULATE BEHAVIOR: when transcript.Read succeeds, the
+		// returned Summary's fields must actually flow through into the View.
+		// (Not the `err == nil` guard itself — see the COVERAGE NOTE on it in
+		// view.go for why that guard is unpinnable by any fixture.)
 		cwd, sessionID := "/tmp/has-transcript", "sess-present"
 		registryDir := newRegistry(t, cwd, sessionID)
 		home := t.TempDir()
@@ -444,5 +452,115 @@ func TestCostForPropagatesTranscriptError(t *testing.T) {
 	if gotTokens != wantTokens || math.Abs(gotCost-wantCost) > 1e-9 {
 		t.Errorf("a failed Cost() call must not poison the cache: retry got %d,%v want %d,%v",
 			gotTokens, gotCost, wantTokens, wantCost)
+	}
+}
+
+// TestCostForActuallyCaches pins CostFor's cache WRITE
+// (`costCache[p] = costEntry{...}`), which every other test in this file leaves
+// uncovered: each one either pokes costCache directly or calls CostFor once with
+// no expectation about the cache afterwards. Delete the write line and the whole
+// suite stays green while memoisation silently stops working — exactly the thing
+// CostFor exists to avoid (a 396ms/203MB rescan on every call).
+//
+// Uses the same unreadable-file technique as
+// TestCostForPropagatesTranscriptError: after the first call caches the real
+// values, the file is made unreadable WITHOUT touching its size or mtime. A
+// second call can then only be right by having actually cached: with the write
+// present, costCache still has an entry whose (size, mtime) matches, so the hit
+// returns the real values with the file's content never touched again. With the
+// write deleted, there is nothing to hit, os.Stat still succeeds (chmod doesn't
+// block stat), CostFor falls through to transcript.Cost, which fails to open the
+// unreadable file, and the result is 0,0 instead of the real value.
+func TestCostForActuallyCaches(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission checks are bypassed, so this fixture cannot deny read access")
+	}
+	home := t.TempDir()
+	cwd, sessionID := "/tmp/cost-actually-caches", "sess-actually-caches"
+	v := View{Session: Session{CWD: cwd, SessionID: sessionID}}
+	p := transcript.Path(home, cwd, sessionID)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":` +
+		`{"input_tokens":1000,"output_tokens":100}}}`
+	if err := os.WriteFile(p, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { delete(costCache, p) })
+
+	wantTokens, wantCost := int64(1100), (1000*5.0+100*25.0)/1e6
+	gotTokens, gotCost := CostFor(home, v)
+	if gotTokens != wantTokens || math.Abs(gotCost-wantCost) > 1e-9 {
+		t.Fatalf("first call: got %d,%v want %d,%v", gotTokens, gotCost, wantTokens, wantCost)
+	}
+
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(p, 0o644) }) // let TempDir cleanup remove it
+	if _, err := os.Stat(p); err != nil {
+		t.Skipf("os.Stat unexpectedly failed on a mode-000 file, cannot isolate the guard: %v", err)
+	}
+
+	tokens, cost := CostFor(home, v)
+	if tokens != wantTokens || math.Abs(cost-wantCost) > 1e-9 {
+		t.Errorf("cache write did not survive: got %d,%v want the cached %d,%v "+
+			"(the file is now unreadable, so a correct answer here can only come from the cache)",
+			tokens, cost, wantTokens, wantCost)
+	}
+}
+
+// TestCostForConcurrentAccess calls CostFor from many goroutines at once, for
+// many DISTINCT sessions that have never been cached before — so each one is a
+// genuine cache MISS that writes a brand new entry into costCache, not just a
+// concurrent read of an already-cached one. That is what actually races: Task 9
+// wires CostFor into bubbletea, where the 2-second poller and per-selection cost
+// lookups run as separate tea.Cmd goroutines, so this shape of concurrent access
+// is real, not contrived.
+//
+// This alone is the proof `go test ./... -race` cannot supply: the race
+// detector only reports races it actually OBSERVES, and nothing in the rest of
+// this package calls CostFor from more than one goroutine. Run under `-race`,
+// this test fails loudly without costMu (either a reported data race, or Go's
+// runtime "fatal error: concurrent map writes", which -race does not even need
+// to catch since the runtime detects it unconditionally) and passes cleanly
+// with it — verified by temporarily commenting out both costMu.Lock/Unlock
+// pairs in CostFor and re-running this test alone.
+func TestCostForConcurrentAccess(t *testing.T) {
+	home := t.TempDir()
+	const n = 64
+	views := make([]View, n)
+	for i := 0; i < n; i++ {
+		cwd := fmt.Sprintf("/tmp/concurrent-%d", i)
+		sessionID := fmt.Sprintf("sess-concurrent-%d", i)
+		views[i] = View{Session: Session{CWD: cwd, SessionID: sessionID}}
+		line := `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":` +
+			`{"input_tokens":10,"output_tokens":10}}}`
+		writeTranscript(t, home, cwd, sessionID, line)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < n; i++ {
+			delete(costCache, transcript.Path(home, views[i].CWD, views[i].SessionID))
+		}
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(v View) {
+			defer wg.Done()
+			CostFor(home, v)
+		}(views[i])
+	}
+	wg.Wait()
+
+	// Every session was genuinely costed (not lost to a clobbered write), which
+	// -race/the runtime detector alone would not tell us.
+	for i := 0; i < n; i++ {
+		tokens, _ := CostFor(home, views[i])
+		if tokens != 20 {
+			t.Errorf("session %d: got %d tokens, want 20 (a concurrent write may have been lost)", i, tokens)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/transcript"
@@ -130,7 +131,19 @@ type costEntry struct {
 	cost   float64
 }
 
-var costCache = map[string]costEntry{}
+var (
+	costCache = map[string]costEntry{}
+	// costMu guards costCache. bubbletea runs tea.Cmds in their own goroutines,
+	// and Task 9 wires CostFor into one: the 2-second poll and a per-selection
+	// cost lookup can both be in flight at once, each potentially populating a
+	// NEW cache entry for a different session it has never seen before (a cache
+	// HIT needs no write, but two concurrent MISSES for different paths both
+	// write). Concurrent writes to a Go map don't corrupt quietly — the runtime
+	// detects it and panics with "concurrent map writes", taking the whole TUI
+	// down. See TestCostForConcurrentAccess, which calls CostFor from many
+	// goroutines at once and only stays green because of this lock.
+	costMu sync.Mutex
+)
 
 // CostFor returns the token total and cost for one session, computed lazily.
 //
@@ -146,6 +159,7 @@ func CostFor(home string, v View) (int64, float64) {
 	if err != nil {
 		return 0, 0
 	}
+	costMu.Lock()
 	// COVERAGE NOTE: the leading `ok &&` is currently unpinnable by any realistic
 	// fixture. A missing map entry yields the zero costEntry{} (size 0, zero
 	// time.Time), so `ok` only changes the outcome when a real file's Stat also
@@ -153,13 +167,17 @@ func CostFor(home string, v View) (int64, float64) {
 	// never happens for anything the OS actually wrote. Kept for the same reason
 	// as the `err == nil` guard above: it states the real precondition ("was
 	// this ever cached") rather than relying on that coincidence.
-	if e, ok := costCache[p]; ok && e.size == st.Size() && e.mtime.Equal(st.ModTime()) {
+	e, ok := costCache[p]
+	costMu.Unlock()
+	if ok && e.size == st.Size() && e.mtime.Equal(st.ModTime()) {
 		return e.tokens, e.cost
 	}
 	u, c, err := transcript.Cost(p)
 	if err != nil {
 		return 0, 0
 	}
+	costMu.Lock()
 	costCache[p] = costEntry{size: st.Size(), mtime: st.ModTime(), tokens: u.Total(), cost: c}
+	costMu.Unlock()
 	return u.Total(), c
 }
