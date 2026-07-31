@@ -27,6 +27,10 @@ const (
 	// listCursorWidth is the visible width consumed by the "› " / "  " prefix
 	// renderList prepends to every row.
 	listCursorWidth = 2
+
+	// footerLines is the rows View reserves below the panes for the status line
+	// and the key legend.
+	footerLines = 2
 )
 
 // paneWidths partitions the terminal width between list and preview.
@@ -46,6 +50,32 @@ func paneStyleHeight(outerH int) int { return max(0, outerH-paneBorderH) }
 // paneInnerWidth returns the columns available to text inside a pane of the
 // given outer width, after both its border and its horizontal padding.
 func paneInnerWidth(outerW int) int { return max(0, outerW-paneBorderW-panePadW) }
+
+// paneInnerHeight returns the rows available to text inside a pane of the given
+// outer height. There is no vertical-padding term because paneStyle is
+// Padding(0, 1) — it pads horizontally only, which is why panePadW exists and
+// panePadH does not. If that padding ever gains a vertical component, this
+// function needs the matching term.
+func paneInnerHeight(outerH int) int { return max(0, outerH-paneBorderH) }
+
+// bodyPaneHeight is the height the two panes get: the terminal minus the
+// status/legend footer.
+//
+// View and syncPreview must agree on this exactly. If they drift, the viewport
+// is sized for a pane of one height while being rendered into a pane of
+// another — so both call this rather than each computing m.height-footerLines.
+func bodyPaneHeight(termH int) int { return max(1, termH-footerLines) }
+
+// previewBodyHeight is how many rows the scrollable exchange gets: whatever the
+// preview pane's interior has left after the pinned metadata block. Never
+// negative — viewport.SetContent panics on a negative height.
+func previewBodyHeight(paneInnerH, metadataLines int) int {
+	h := paneInnerH - metadataLines
+	if h < 0 {
+		return 0
+	}
+	return h
+}
 
 // truncateToWidth clips s to w columns, marking the cut with an ellipsis.
 func truncateToWidth(s string, w int) string {

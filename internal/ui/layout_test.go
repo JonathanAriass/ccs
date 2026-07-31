@@ -202,6 +202,40 @@ func TestHomeAbbrev(t *testing.T) {
 	}
 }
 
+func TestPreviewBodyHeight(t *testing.T) {
+	cases := []struct {
+		name                 string
+		paneInnerH, metadata int
+		want                 int
+	}{
+		{"normal", 20, 9, 11},
+		{"metadata fills the pane", 9, 9, 0},
+		{"metadata exceeds the pane", 6, 9, 0},
+		{"degenerate pane", 0, 9, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := previewBodyHeight(c.paneInnerH, c.metadata); got != c.want {
+				t.Errorf("previewBodyHeight(%d, %d) = %d, want %d",
+					c.paneInnerH, c.metadata, got, c.want)
+			}
+		})
+	}
+}
+
+func TestBodyPaneHeightNeverDropsBelowOne(t *testing.T) {
+	// lipgloss Height(0) and negative heights both misrender. View already
+	// clamps; bodyPaneHeight is now the single place that does it.
+	for _, termH := range []int{0, 1, 2, 3, 30} {
+		if got := bodyPaneHeight(termH); got < 1 {
+			t.Errorf("bodyPaneHeight(%d) = %d, want >= 1", termH, got)
+		}
+	}
+	if got := bodyPaneHeight(30); got != 28 {
+		t.Errorf("bodyPaneHeight(30) = %d, want 28", got)
+	}
+}
+
 func TestWrapToWidth(t *testing.T) {
 	cases := []struct {
 		name string

@@ -7,6 +7,7 @@ import "github.com/charmbracelet/bubbles/key"
 type keyMap struct {
 	Up      key.Binding
 	Down    key.Binding
+	Cycle   key.Binding
 	Focus   key.Binding
 	Refresh key.Binding
 	Quit    key.Binding
@@ -21,6 +22,10 @@ func defaultKeys() keyMap {
 		Down: key.NewBinding(
 			key.WithKeys("down", "j"),
 			key.WithHelp("↓/j", "down"),
+		),
+		Cycle: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("⇥", "switch pane"),
 		),
 		Focus: key.NewBinding(
 			key.WithKeys("enter"),
@@ -38,9 +43,9 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Focus, k.Refresh, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down}, {k.Focus, k.Refresh}, {k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down}, {k.Cycle, k.Focus, k.Refresh}, {k.Quit}}
 }

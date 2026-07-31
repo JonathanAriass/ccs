@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/JonathanAriass/ccs/internal/session"
@@ -393,6 +395,174 @@ func TestFocusOnEmptyListIsNoop(t *testing.T) {
 	}
 	if m.status != "" {
 		t.Errorf("Enter on an empty list must not set a status, got %q", m.status)
+	}
+}
+
+// modelWithOverflowingPreview builds a model the way the program does — through
+// Update — so the viewport's size and content come from production code rather
+// than from the test.
+//
+// This matters more than it looks. A test that assigns m.preview.Height and
+// calls SetContent itself passes whether or not anything in the real message
+// flow ever sizes or fills that viewport. Sizing it in View (which has a value
+// receiver, so its writes are discarded) leaves the live model at Height 0
+// where LineDown is a no-op — and every hand-built test stays green.
+func modelWithOverflowingPreview(t *testing.T, n int) Model {
+	t.Helper()
+	long := strings.Repeat("word ", 400)
+	views := make([]session.View, n)
+	for i := range views {
+		views[i] = session.View{
+			Session:       session.Session{SessionID: fmt.Sprintf("s%d", i)},
+			HasPreview:    true,
+			LastHuman:     long,
+			LastAssistant: long,
+		}
+	}
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	m = next.(Model)
+	next, _ = m.Update(sessionsMsg{views: views})
+	m = next.(Model)
+	if n > 0 && m.preview.TotalLineCount() <= m.preview.Height {
+		t.Fatalf("fixture does not overflow: %d content lines in a %d-row viewport",
+			m.preview.TotalLineCount(), m.preview.Height)
+	}
+	return m
+}
+
+func TestUpdateSizesAndFillsTheViewport(t *testing.T) {
+	// The guard for the architectural rule. Drives the model ONLY through
+	// Update — assigns nothing — so it fails if sizing or SetContent lives in
+	// View, where the writes are discarded.
+	m := modelWithOverflowingPreview(t, 1)
+
+	if m.preview.Height <= 0 {
+		t.Fatalf("viewport Height = %d after a WindowSizeMsg; sizing never reached the live model",
+			m.preview.Height)
+	}
+	if m.preview.Width <= 0 {
+		t.Fatalf("viewport Width = %d after a WindowSizeMsg", m.preview.Width)
+	}
+
+	m.focus = focusPreview
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = next.(Model)
+	if m.preview.YOffset == 0 {
+		t.Error("j did not scroll a viewport sized and filled entirely through Update")
+	}
+}
+
+func TestTabTogglesFocus(t *testing.T) {
+	// Asserts focus CHANGED from a known starting state. Asserting "focus is
+	// preview" after Tab would pass even with Tab deleted, whenever focus
+	// already happened to be there — the post-state-already-held trap.
+	m := modelWithOverflowingPreview(t, 3)
+	if m.focus != focusList {
+		t.Fatalf("fixture must start on the list, got %v", m.focus)
+	}
+	tab := tea.KeyMsg{Type: tea.KeyTab}
+
+	next, _ := m.Update(tab)
+	m = next.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("first Tab: focus = %v, want focusPreview", m.focus)
+	}
+
+	next, _ = m.Update(tab)
+	m = next.(Model)
+	if m.focus != focusList {
+		t.Errorf("second Tab: focus = %v, want focusList (Tab must toggle, not set)", m.focus)
+	}
+}
+
+func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
+	// Each case asserts BOTH halves: the focused pane moved AND the other did
+	// not. Asserting only the first half passes for a `j` that moves neither.
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+
+	t.Run("list focused: cursor moves, viewport does not scroll", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusList
+		startOffset := m.preview.YOffset
+
+		next, _ := m.Update(down)
+		m = next.(Model)
+
+		if m.cursor != 1 {
+			t.Errorf("cursor = %d, want 1", m.cursor)
+		}
+		if m.preview.YOffset != startOffset {
+			t.Errorf("viewport scrolled to %d while the list had focus", m.preview.YOffset)
+		}
+	})
+
+	t.Run("preview focused: viewport scrolls, cursor does not move", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusPreview
+		startCursor := m.cursor
+
+		next, _ := m.Update(down)
+		m = next.(Model)
+
+		if m.preview.YOffset == 0 {
+			t.Error("viewport did not scroll while the preview had focus")
+		}
+		if m.cursor != startCursor {
+			t.Errorf("cursor moved to %d while the preview had focus", m.cursor)
+		}
+	})
+}
+
+func TestSelectionChangeResetsScrollToTop(t *testing.T) {
+	// Resets from a SCROLLED position. Resetting a viewport already at zero
+	// would pass with GotoTop deleted.
+	m := modelWithOverflowingPreview(t, 3)
+	m.focus = focusPreview
+	for i := 0; i < 3; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = next.(Model)
+	}
+	if m.preview.YOffset == 0 {
+		t.Fatal("fixture must be scrolled before the reset is meaningful")
+	}
+
+	m.focus = focusList
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = next.(Model)
+
+	if m.cursor != 1 {
+		t.Fatalf("cursor = %d — the selection did not actually change", m.cursor)
+	}
+	if m.preview.YOffset != 0 {
+		t.Errorf("YOffset = %d after a selection change, want 0", m.preview.YOffset)
+	}
+}
+
+func TestEnterJumpsRegardlessOfFocus(t *testing.T) {
+	// Enter must not change meaning with focus. Both cases select a session
+	// with no PID, so Focus fails predictably and sets a status — which proves
+	// the Enter branch RAN, rather than proving nothing by doing nothing.
+	for _, f := range []focusArea{focusList, focusPreview} {
+		m := modelWithOverflowingPreview(t, 1)
+		m.focus = f
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = next.(Model)
+		if m.status == "" {
+			t.Errorf("focus %v: Enter produced no status — the Focus branch did not run", f)
+		}
+	}
+}
+
+func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
+	// previewBodyHeight subtracts a CONSTANT from the pane height. If the
+	// metadata block gains or loses a line, the viewport is silently mis-sized
+	// — content clipped, or the pane overflowing its own border. This test is
+	// the only link between the rendered block and the number.
+	m := modelWithOverflowingPreview(t, 1)
+	got := strings.Count(m.renderPreviewMetadata(m.selected()), "\n") + 1
+	if got != previewMetadataLines {
+		t.Errorf("metadata renders %d lines, previewMetadataLines = %d", got, previewMetadataLines)
 	}
 }
 

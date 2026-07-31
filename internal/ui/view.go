@@ -126,7 +126,7 @@ func (m Model) View() string {
 	}
 
 	listW, previewW := paneWidths(m.width)
-	paneH := max(1, m.height-2) // leave room for the status/legend footer
+	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
 
 	var list string
 	if m.err != nil {
@@ -203,39 +203,47 @@ func (m Model) renderList(width, height int) string {
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }
 
-func (m Model) renderPreview(width, height int) string {
-	inner := paneInnerWidth(width)
+// previewMetadataLines is how many rows renderPreviewMetadata occupies. It is
+// pinned to the real output by TestPreviewMetadataLineCountMatchesTheConstant —
+// if that test reports a different number, change this constant to match the
+// test's number and say so in your report. Do not adjust the test to match the
+// constant; the rendered output is the authority.
+const previewMetadataLines = 9
+
+// renderPreviewMetadata is the pinned part of the preview: everything above the
+// scrolling exchange, ending with the blank separator line.
+//
+// It stays pinned because Status/Version/TTY/Tokens/Cost are reference the
+// reader wants WHILE reading a long message. Scrolled away, the reader loses
+// track of which session they are even looking at.
+func (m Model) renderPreviewMetadata(v *session.View) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Preview"))
+	b.WriteString("\n" + previewField("Status", v.Status))
+	b.WriteString("\n" + previewField("Version", v.Version))
+	tty := v.TTY
+	if tty == "" {
+		tty = "-"
+	}
+	b.WriteString("\n" + previewField("TTY", tty))
+	b.WriteString("\n\n" + labelStyle.Render("main thread"))
+	b.WriteString("\n" + previewField("Tokens", fmt.Sprintf("%d", v.Tokens)))
+	b.WriteString("\n" + previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)))
+	b.WriteString("\n")
+	return b.String()
+}
 
+func (m Model) renderPreview(width, height int) string {
+	var b strings.Builder
 	if v := m.selected(); v == nil {
+		b.WriteString(titleStyle.Render("Preview"))
 		b.WriteString("\n  (no session selected)")
 	} else {
-		// Status/Version/TTY/Tokens/Cost render for EVERY selected session,
-		// including one with no transcript exchange to show. HasPreview scopes
-		// "no preview" to the last exchange only — it used to gate this whole
-		// pane, which blanked the metadata for 4 of 14 live sessions: precisely
-		// the ones where the tty and the cost are the only information there is.
-		b.WriteString("\n" + previewField("Status", v.Status))
-		b.WriteString("\n" + previewField("Version", v.Version))
-		tty := v.TTY
-		if tty == "" {
-			tty = "-"
-		}
-		b.WriteString("\n" + previewField("TTY", tty))
-		b.WriteString("\n\n" + labelStyle.Render("main thread"))
-		b.WriteString("\n" + previewField("Tokens", fmt.Sprintf("%d", v.Tokens)))
-		b.WriteString("\n" + previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)))
-		if !v.HasPreview {
-			b.WriteString("\n\n  no preview")
-		} else {
-			b.WriteString("\n\n" + labelStyle.Render("Last human:"))
-			b.WriteString("\n" + wrapToWidth(sanitize(v.LastHuman), inner))
-			b.WriteString("\n\n" + labelStyle.Render("Last assistant:"))
-			b.WriteString("\n" + wrapToWidth(sanitize(v.LastAssistant), inner))
-		}
+		b.WriteString(m.renderPreviewMetadata(v))
+		// Sizing and content come from syncPreview in Update. Writing them here
+		// would be discarded — View has a value receiver.
+		b.WriteString("\n" + m.preview.View())
 	}
-
 	return previewPane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }

@@ -76,6 +76,12 @@ func TestViewSanitizesAllTranscriptDerivedFields(t *testing.T) {
 		LastAssistant: "ok\tgot\x07it\r",
 		HasPreview:    true,
 	}
+	// The preview body (LastHuman/LastAssistant) only reaches the frame via
+	// m.preview, which syncPreview fills — View() alone leaves it empty. See
+	// TestUpdateSizesAndFillsTheViewport's doc comment for why that split
+	// exists. Without this call the assertions below would still pass, but
+	// vacuously: an empty viewport has no control characters either.
+	m.syncPreview()
 
 	out := visibleText(m.View())
 	if got := controlChars(out); len(got) > 0 {
@@ -132,6 +138,7 @@ func TestViewNoPreviewWhenHasPreviewFalse(t *testing.T) {
 		Session:    session.Session{Name: "x", Status: "idle"},
 		HasPreview: false,
 	}
+	m.syncPreview() // fills m.preview with "no preview" — see TestViewSanitizesAllTranscriptDerivedFields
 	out := visibleText(m.View())
 	if !strings.Contains(out, "no preview") {
 		t.Errorf("expected \"no preview\" in the frame, got:\n%s", out)
@@ -146,6 +153,7 @@ func TestViewHasPreviewShowsDetail(t *testing.T) {
 		HasPreview: true,
 		LastHuman:  "do the thing",
 	}
+	m.syncPreview() // see TestViewSanitizesAllTranscriptDerivedFields
 	out := visibleText(m.View())
 	if strings.Contains(out, "no preview") {
 		t.Error("a session with HasPreview true must not show the no-preview placeholder")
@@ -349,6 +357,7 @@ func TestViewShowsMetadataEvenWithoutAPreview(t *testing.T) {
 		Cost:       12.34,
 		HasPreview: false,
 	}
+	m.syncPreview() // see TestViewSanitizesAllTranscriptDerivedFields
 	out := visibleText(m.View())
 	for _, want := range []string{"no preview", "busy", "9.9.9", "ttys042", "4242", "$12.34"} {
 		if !strings.Contains(out, want) {

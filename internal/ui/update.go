@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"github.com/JonathanAriass/ccs/internal/iterm"
 	"github.com/JonathanAriass/ccs/internal/session"
 	"github.com/charmbracelet/bubbles/key"
@@ -77,10 +79,41 @@ func reconcile(old, next []session.View, cursor int) ([]session.View, int) {
 	return next, found
 }
 
+// syncPreview resizes and refills the preview viewport from the current
+// selection and terminal size.
+//
+// This lives in Update, not View, and that is not a style preference: View has
+// a value receiver, so anything it writes to m.preview is discarded when the
+// frame returns. The live model would keep Height 0 and no content, and
+// LineDown on a zero-height empty viewport returns without moving.
+func (m *Model) syncPreview() {
+	_, previewW := paneWidths(m.width)
+	inner := paneInnerWidth(previewW)
+	m.preview.Width = inner
+	m.preview.Height = previewBodyHeight(
+		paneInnerHeight(bodyPaneHeight(m.height)), previewMetadataLines)
+
+	v := m.selected()
+	switch {
+	case v == nil:
+		m.preview.SetContent("")
+	case !v.HasPreview:
+		m.preview.SetContent("  no preview")
+	default:
+		var body strings.Builder
+		body.WriteString(labelStyle.Render("Last human:") + "\n")
+		body.WriteString(wrapToWidth(sanitize(v.LastHuman), inner))
+		body.WriteString("\n\n" + labelStyle.Render("Last assistant:") + "\n")
+		body.WriteString(wrapToWidth(sanitize(v.LastAssistant), inner))
+		m.preview.SetContent(body.String())
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.syncPreview()
 		return m, nil
 
 	case tickMsg:
@@ -99,6 +132,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Carry the selection and the cost figures across the re-sort, and clamp
 		// the cursor when its session has exited. See reconcile.
 		m.views, m.cursor = reconcile(m.views, msg.views, m.cursor)
+		// The selected session's last message can change between polls; refill
+		// so the pane shows the current exchange rather than the one that was
+		// current when the cursor last moved.
+		m.syncPreview()
 		// Refresh the selected row's cost every poll too, not just on cursor
 		// move: a busy session's transcript keeps growing, so its cost should
 		// keep climbing on screen without the user having to nudge the cursor.
@@ -128,7 +165,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 
+	case key.Matches(msg, m.keys.Cycle):
+		if m.focus == focusList {
+			m.focus = focusPreview
+		} else {
+			m.focus = focusList
+		}
+		return m, nil
+
 	case key.Matches(msg, m.keys.Up):
+		if m.focus == focusPreview {
+			m.preview.LineUp(1)
+			return m, nil
+		}
 		prev := m.cursor
 		m.cursor = clamp(m.cursor-1, len(m.views))
 		if m.cursor != prev {
@@ -136,15 +185,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// session — no tab to focus"). Moving off that row makes it wrong,
 			// so it goes with the selection.
 			m.status = ""
+			m.syncPreview()
+			// New session, new content: start at the top rather than part-way
+			// into a message whose beginning the reader has not seen.
+			m.preview.GotoTop()
 			return m, m.costCmdForSelected()
 		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
+		if m.focus == focusPreview {
+			m.preview.LineDown(1)
+			return m, nil
+		}
 		prev := m.cursor
 		m.cursor = clamp(m.cursor+1, len(m.views))
 		if m.cursor != prev {
 			m.status = ""
+			m.syncPreview()
+			m.preview.GotoTop()
 			return m, m.costCmdForSelected()
 		}
 		return m, nil

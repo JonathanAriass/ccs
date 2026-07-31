@@ -5,7 +5,20 @@ import (
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+)
+
+// focusArea is which pane j/k act on. Tab toggles it.
+//
+// Enter, r and q are deliberately NOT affected: Enter is the tool's only
+// action, and making it conditional on focus introduces the one mode error
+// that costs either a wrong-tab jump or a silent no-op.
+type focusArea int
+
+const (
+	focusList focusArea = iota
+	focusPreview
 )
 
 // pollInterval is how often the registry is re-read. The registry is small
@@ -39,6 +52,9 @@ type Model struct {
 	status string // transient one-line message, e.g. a failed focus
 	err    error
 	keys   keyMap
+
+	focus   focusArea      // which pane j/k move
+	preview viewport.Model // scrolls the last exchange only; metadata stays pinned
 }
 
 func New() Model {
