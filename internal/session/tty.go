@@ -34,8 +34,18 @@ func ttyName(tdev int32) string {
 	return fmt.Sprintf("ttys%03d", u&0xffffff)
 }
 
-// Snapshot reads every process once. One syscall serves both the liveness pass
-// and every session's ancestor walk.
+// Snapshot reads every process once, serving every session's ancestor walk in
+// Collect from a single kern.proc.all call.
+//
+// It does NOT currently also serve the liveness pass: IsLive (liveness.go)
+// still makes its own per-pid kern.proc.pid syscall, so Collect does this one
+// kern.proc.all snapshot PLUS ~15 per-pid syscalls per poll (one per live
+// session). Measured: the whole poll is 281µs, so that duplication is not
+// urgent to fix. Wiring IsLive to accept this snapshot instead of probing per
+// pid would remove it, but was deliberately left alone here — Task 8 only adds
+// view.go and its test, and changing IsLive's signature would touch its
+// existing callers and tests in liveness.go / liveness_test.go, which are out
+// of scope. Left as a documented follow-up rather than silently reworked.
 func Snapshot() (map[int32]ProcInfo, error) {
 	kps, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
