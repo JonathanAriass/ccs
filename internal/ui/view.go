@@ -128,13 +128,19 @@ func (m Model) View() string {
 	listW, previewW := paneWidths(m.width)
 	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
 
+	lp, pp := listPane, previewPane
+	if m.focus == focusPreview {
+		// The brighter border follows focus.
+		lp, pp = previewPane, listPane
+	}
+
 	var list string
 	if m.err != nil {
-		list = m.renderListError(listW, paneH)
+		list = m.renderListError(listW, paneH, lp)
 	} else {
-		list = m.renderList(listW, paneH)
+		list = m.renderList(listW, paneH, lp)
 	}
-	preview := m.renderPreview(previewW, paneH)
+	preview := m.renderPreview(previewW, paneH, pp)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
 
 	// Both footer lines are hard-clipped to the terminal width.
@@ -167,15 +173,15 @@ func (m Model) View() string {
 // renderListError draws the list pane in its error state: m.err REPLACES the
 // session list (not the whole screen — the preview pane and legend still
 // render normally around it).
-func (m Model) renderListError(width, height int) string {
+func (m Model) renderListError(width, height int, pane lipgloss.Style) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Sessions"))
 	b.WriteString("\n" + errStyle.Render("error: "+sanitize(m.err.Error())))
-	return listPane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
+	return pane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }
 
-func (m Model) renderList(width, height int) string {
+func (m Model) renderList(width, height int, pane lipgloss.Style) string {
 	inner := max(0, paneInnerWidth(width)-listCursorWidth)
 	home, _ := os.UserHomeDir()
 	now := time.Now()
@@ -199,7 +205,7 @@ func (m Model) renderList(width, height int) string {
 			b.WriteString("\n  " + line)
 		}
 	}
-	return listPane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
+	return pane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }
 
@@ -218,7 +224,16 @@ const previewMetadataLines = 9
 // track of which session they are even looking at.
 func (m Model) renderPreviewMetadata(v *session.View) string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Preview"))
+	title := "Preview"
+	if m.focus == focusPreview {
+		// A text marker, not colour alone: the focused state must stay legible
+		// on a terminal whose colour rendering we cannot verify.
+		title += " ▸"
+	}
+	if ind := scrollIndicator(m.preview.TotalLineCount(), m.preview.Height, m.preview.YOffset); ind != "" {
+		title += " " + ind
+	}
+	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n" + previewField("Status", v.Status))
 	b.WriteString("\n" + previewField("Version", v.Version))
 	tty := v.TTY
@@ -233,7 +248,7 @@ func (m Model) renderPreviewMetadata(v *session.View) string {
 	return b.String()
 }
 
-func (m Model) renderPreview(width, height int) string {
+func (m Model) renderPreview(width, height int, pane lipgloss.Style) string {
 	var b strings.Builder
 	if v := m.selected(); v == nil {
 		b.WriteString(titleStyle.Render("Preview"))
@@ -244,6 +259,6 @@ func (m Model) renderPreview(width, height int) string {
 		// would be discarded — View has a value receiver.
 		b.WriteString("\n" + m.preview.View())
 	}
-	return previewPane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
+	return pane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }

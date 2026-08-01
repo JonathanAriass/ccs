@@ -236,6 +236,34 @@ func TestBodyPaneHeightNeverDropsBelowOne(t *testing.T) {
 	}
 }
 
+func TestScrollIndicator(t *testing.T) {
+	// Pins BOTH directions. Testing only "long content shows a marker" leaves
+	// the short-content case free to start showing one; testing only the empty
+	// case leaves the marker free to vanish entirely.
+	cases := []struct {
+		name                  string
+		total, height, offset int
+		want                  string
+	}{
+		{"fits exactly — no marker", 10, 10, 0, ""},
+		{"shorter than the pane — no marker", 3, 10, 0, ""},
+		{"overflows, at the top", 30, 10, 0, "1/3"},
+		{"overflows, second page", 30, 10, 10, "2/3"},
+		{"overflows, last page", 30, 10, 20, "3/3"},
+		{"partial last page rounds up", 25, 10, 20, "3/3"},
+		{"offset past the end clamps", 25, 10, 24, "3/3"},
+		{"degenerate height", 30, 0, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := scrollIndicator(c.total, c.height, c.offset); got != c.want {
+				t.Errorf("scrollIndicator(%d,%d,%d) = %q, want %q",
+					c.total, c.height, c.offset, got, c.want)
+			}
+		})
+	}
+}
+
 func TestWrapToWidth(t *testing.T) {
 	cases := []struct {
 		name string

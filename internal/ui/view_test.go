@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
@@ -192,7 +193,7 @@ func TestViewDimsRowsWithNoTTY(t *testing.T) {
 	// border also happens to use color 240, same as dimRow, and would
 	// otherwise contaminate a substring search over the full joined frame.
 	listW, _ := paneWidths(m.width)
-	raw := m.renderList(listW, bodyPaneHeight(m.height))
+	raw := m.renderList(listW, bodyPaneHeight(m.height), listPane)
 
 	dimANSI := dimRow.Render("z") // capture this style's actual escape prefix
 	dimPrefix := dimANSI[:strings.Index(dimANSI, "z")]
@@ -387,6 +388,47 @@ func TestViewRowShowsAgeFromRegistryMilliseconds(t *testing.T) {
 	}
 	if strings.Contains(out, "now") {
 		t.Errorf("a 3-hour-old session must not render as \"now\" — the age is being read in the wrong unit:\n%s", out)
+	}
+}
+
+func TestPreviewTitleShowsFocus(t *testing.T) {
+	// Asserts on the TEXT of the title, not on a style. The terminal is
+	// dark-ansi and colour cannot be verified through the pty harness, so the
+	// focused state must be legible without it.
+	m := modelWithOverflowingPreview(t, 2)
+
+	m.focus = focusList
+	if s := m.View(); strings.Contains(s, "Preview ▸") {
+		t.Error("preview title shows the focus marker while the list has focus")
+	}
+
+	m.focus = focusPreview
+	if s := m.View(); !strings.Contains(s, "Preview ▸") {
+		t.Error("preview title lacks the focus marker while the preview has focus")
+	}
+}
+
+func TestPreviewTitleShowsOverflowOnlyWhenItOverflows(t *testing.T) {
+	// Both directions again, driven through Update so the viewport's real size
+	// and content decide the answer.
+	over := modelWithOverflowingPreview(t, 1)
+	if !strings.Contains(over.View(), "1/") {
+		t.Error("overflowing exchange shows no page indicator")
+	}
+
+	short := New()
+	next, _ := short.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	short = next.(Model)
+	next, _ = short.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: "s0"}, HasPreview: true, LastHuman: "hi", LastAssistant: "hello"},
+	}})
+	short = next.(Model)
+	if short.preview.TotalLineCount() > short.preview.Height {
+		t.Fatalf("fixture must fit: %d lines in %d rows",
+			short.preview.TotalLineCount(), short.preview.Height)
+	}
+	if strings.Contains(short.View(), "1/") {
+		t.Error("short exchange shows a page indicator it should not")
 	}
 }
 

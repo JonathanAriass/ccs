@@ -179,6 +179,24 @@ func compactAge(t, now time.Time) string {
 	}
 }
 
+// scrollIndicator renders "2/3" when content overflows its pane, and "" when it
+// fits.
+//
+// Without it a clipped message looks identical to a complete one — which is the
+// defect this whole feature exists to remove, merely relocated from the pane
+// body to the pane title.
+func scrollIndicator(total, height, offset int) string {
+	if height <= 0 || total <= height {
+		return ""
+	}
+	pages := (total + height - 1) / height
+	page := offset/height + 1
+	if page > pages {
+		page = pages
+	}
+	return fmt.Sprintf("%d/%d", page, pages)
+}
+
 // homeAbbrev replaces a leading home-directory prefix with "~", the way a
 // shell prompt does. It only matches at a path separator boundary — home
 // "/Users/x" must not abbreviate "/Users/xavier/proj", a different user's
