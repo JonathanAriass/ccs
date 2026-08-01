@@ -191,7 +191,20 @@ func scrollIndicator(total, height, offset int) string {
 	}
 	pages := (total + height - 1) / height
 	page := offset/height + 1
-	if page > pages {
+	// page reports which page-sized CHUNK the top visible line falls in. The
+	// last screenful straddles two chunks whenever height does not evenly
+	// divide total, so the top line never enters the final chunk and page
+	// would sit at pages-1 with nothing left to read — inverting the whole
+	// point of this indicator (a complete message reading as clipped).
+	//
+	// offset >= total-height is "the viewport is scrolled as far as it can
+	// go": total-height is bubbles' own maxYOffset PROVIDED the viewport's
+	// Style carries no vertical frame size, which is true everywhere in this
+	// codebase (m.preview.Style is never set — see
+	// TestPreviewViewportStyleHasNoFrameSize). At that offset the reader is
+	// on the last line available, so the last page is exactly what they're
+	// on.
+	if offset >= total-height {
 		page = pages
 	}
 	return fmt.Sprintf("%d/%d", page, pages)

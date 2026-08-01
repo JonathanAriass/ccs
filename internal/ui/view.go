@@ -222,16 +222,33 @@ const previewMetadataLines = 9
 // It stays pinned because Status/Version/TTY/Tokens/Cost are reference the
 // reader wants WHILE reading a long message. Scrolled away, the reader loses
 // track of which session they are even looking at.
-func (m Model) renderPreviewMetadata(v *session.View) string {
+//
+// innerW is the pane's content width in display columns. The title MUST fit
+// inside it: lipgloss word-wraps a Style.Width() block that overflows rather
+// than clipping it, so a too-wide title becomes two lines, previewMetadataLines
+// silently goes stale, and the pane's own MaxHeight then clips its bottom
+// border off the screen (regression at widths 40-42 with a 2-digit page count,
+// or wider with 3 digits — see TestPreviewPaneBorderSurvivesEveryWidth's ╯
+// count).
+func (m Model) renderPreviewMetadata(v *session.View, innerW int) string {
 	var b strings.Builder
 	title := "Preview"
+	// Degrade in priority order rather than truncate mid-token. Focus is the
+	// more important affordance at a narrow width — it tells the user what
+	// j/k will do — so try the marker first, then the page indicator, and
+	// drop either (or both) the moment it would not fit. The title must never
+	// wrap onto a second line.
 	if m.focus == focusPreview {
 		// A text marker, not colour alone: the focused state must stay legible
 		// on a terminal whose colour rendering we cannot verify.
-		title += " ▸"
+		if candidate := title + " ▸"; lipgloss.Width(candidate) <= innerW {
+			title = candidate
+		}
 	}
 	if ind := scrollIndicator(m.preview.TotalLineCount(), m.preview.Height, m.preview.YOffset); ind != "" {
-		title += " " + ind
+		if candidate := title + " " + ind; lipgloss.Width(candidate) <= innerW {
+			title = candidate
+		}
 	}
 	b.WriteString(titleStyle.Render(title))
 	b.WriteString("\n" + previewField("Status", v.Status))
@@ -254,7 +271,7 @@ func (m Model) renderPreview(width, height int, pane lipgloss.Style) string {
 		b.WriteString(titleStyle.Render("Preview"))
 		b.WriteString("\n  (no session selected)")
 	} else {
-		b.WriteString(m.renderPreviewMetadata(v))
+		b.WriteString(m.renderPreviewMetadata(v, paneInnerWidth(width)))
 		// Sizing and content come from syncPreview in Update. Writing them here
 		// would be discarded — View has a value receiver.
 		b.WriteString("\n" + m.preview.View())

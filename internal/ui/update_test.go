@@ -829,9 +829,26 @@ func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
 	// — content clipped, or the pane overflowing its own border. This test is
 	// the only link between the rendered block and the number.
 	m := modelWithOverflowingPreview(t, 1)
-	got := strings.Count(m.renderPreviewMetadata(m.selected()), "\n") + 1
+	_, previewW := paneWidths(m.width)
+	got := strings.Count(m.renderPreviewMetadata(m.selected(), paneInnerWidth(previewW)), "\n") + 1
 	if got != previewMetadataLines {
 		t.Errorf("metadata renders %d lines, previewMetadataLines = %d", got, previewMetadataLines)
+	}
+}
+
+// TestPreviewViewportStyleHasNoFrameSize pins an assumption scrollIndicator's
+// at-bottom branch (layout.go) depends on: offset >= total-height is only
+// "the viewport is scrolled as far as it can go" when the viewport's Style
+// carries no vertical frame size (bubbles' maxYOffset is
+// len(lines)-Height-Style.GetVerticalFrameSize()). m.preview.Style is never
+// set anywhere in this codebase, so that term is 0 — but nothing else says
+// so. If a future change ever gives m.preview a bordered or padded style,
+// this test reddens before the at-bottom branch starts firing one row early.
+func TestPreviewViewportStyleHasNoFrameSize(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	if got := m.preview.Style.GetVerticalFrameSize(); got != 0 {
+		t.Errorf("m.preview.Style.GetVerticalFrameSize() = %d, want 0 — "+
+			"scrollIndicator's at-bottom branch assumes offset>=total-height IS the viewport's maxYOffset", got)
 	}
 }
 

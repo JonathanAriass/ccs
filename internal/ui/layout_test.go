@@ -249,9 +249,21 @@ func TestScrollIndicator(t *testing.T) {
 		{"shorter than the pane — no marker", 3, 10, 0, ""},
 		{"overflows, at the top", 30, 10, 0, "1/3"},
 		{"overflows, second page", 30, 10, 10, "2/3"},
-		{"overflows, last page", 30, 10, 20, "3/3"},
+		{"overflows, last page (height divides total)", 30, 10, 20, "3/3"},
 		{"partial last page rounds up", 25, 10, 20, "3/3"},
-		{"offset past the end clamps", 25, 10, 24, "3/3"},
+		// At-bottom rows for Important #5: the LAST screenful straddles two
+		// page-sized chunks whenever height does not divide total, so the top
+		// visible line's own chunk (what `page` naively reports) sits one
+		// short of `pages` at exactly the offset a scrolled-to-the-end
+		// viewport holds. Each of the two below is red on the pre-fix
+		// formula (page/height+1 alone gives "2/3" and "5/6" respectively,
+		// not the true last page) and green with the at-bottom branch.
+		{"at the bottom, partial last page", 25, 10, 15, "3/3"},
+		{"at the bottom, real fixture size", 95, 17, 78, "6/6"},
+		// Boundary check: one row short of the bottom must NOT be treated as
+		// the last page — pins that the at-bottom branch fires exactly at
+		// total-height, not one early.
+		{"one line above the bottom is NOT the last page", 25, 10, 14, "2/3"},
 		{"degenerate height", 30, 0, 0, ""},
 	}
 	for _, c := range cases {
