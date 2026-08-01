@@ -453,6 +453,61 @@ func TestUpdateSizesAndFillsTheViewport(t *testing.T) {
 	}
 }
 
+// TestWindowResizeAlonePropagatesToTheViewport isolates the
+// tea.WindowSizeMsg case's m.syncPreview() call from the one at the end of
+// the sessionsMsg case. modelWithOverflowingPreview (and every other test
+// using it) sends WindowSizeMsg then sessionsMsg, so sessionsMsg's own
+// syncPreview() call independently re-sizes and re-fills the viewport —
+// masking a missing call in the WindowSizeMsg case entirely. Confirmed by
+// code review: deleting that call reddens nothing.
+//
+// A real resize with no poll in between is not a corner case: the 2s poll
+// interval means dragging a terminal split, or a Neovim window resize via
+// claudecode.nvim, routinely lands well inside that window. Without the
+// call, m.preview keeps the OLD size's Height/Width until the next poll,
+// which the reviewer observed rendering the preview pane one row past the
+// list pane with its own bottom border overwritten by stale-height content.
+func TestWindowResizeAlonePropagatesToTheViewport(t *testing.T) {
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	m = next.(Model)
+	next, _ = m.Update(sessionsMsg{views: []session.View{{
+		Session:    session.Session{SessionID: "s0"},
+		HasPreview: true,
+		LastHuman:  strings.Repeat("word ", 400),
+	}}})
+	m = next.(Model)
+	firstHeight, firstWidth := m.preview.Height, m.preview.Width
+
+	// Resize smaller, with NO sessionsMsg (no poll) in between.
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = next.(Model)
+
+	wantHeight := previewBodyHeight(paneInnerHeight(bodyPaneHeight(16)), previewMetadataLines)
+	if m.preview.Height != wantHeight {
+		t.Errorf("viewport Height = %d after a resize with no intervening poll, want %d (was %d before the resize)",
+			m.preview.Height, wantHeight, firstHeight)
+	}
+	_, wantWidth := paneWidths(80)
+	wantWidth = paneInnerWidth(wantWidth)
+	if m.preview.Width != wantWidth {
+		t.Errorf("viewport Width = %d after a resize with no intervening poll, want %d (was %d before the resize)",
+			m.preview.Width, wantWidth, firstWidth)
+	}
+
+	// Cross-check against the actual rendered frame. With a correct size, the
+	// list and preview panes' bottom borders align on the same line — the
+	// frame's raw text contains exactly two "╯" (bottom-right corners), one
+	// per pane. With the stale (too-tall) viewport from before this bug fix,
+	// the preview pane's own content overflows past where its border belongs
+	// and lipgloss never emits that border row at all within the frame: only
+	// the list pane's "╯" appears. Verified by hand against both frames (this
+	// bug reproduced, then reverted) before writing this assertion.
+	if got := strings.Count(m.View(), "╯"); got != 2 {
+		t.Errorf("rendered frame has %d bottom-right pane corners (╯), want 2 — the preview pane's own border is missing:\n%s", got, m.View())
+	}
+}
+
 func TestTabTogglesFocus(t *testing.T) {
 	// Asserts focus CHANGED from a known starting state. Asserting "focus is
 	// preview" after Tab would pass even with Tab deleted, whenever focus
@@ -480,6 +535,7 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 	// Each case asserts BOTH halves: the focused pane moved AND the other did
 	// not. Asserting only the first half passes for a `j` that moves neither.
 	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	up := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}
 
 	t.Run("list focused: cursor moves, viewport does not scroll", func(t *testing.T) {
 		m := modelWithOverflowingPreview(t, 3)
@@ -497,6 +553,66 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 		}
 	})
 
+	// list-focused-at-the-boundary: the subtest above is blind to an
+	// unconditional m.preview.LineDown(1) run alongside the cursor move —
+	// the move changes the selection, which triggers syncPreview()+GotoTop(),
+	// and GotoTop resets YOffset to 0 regardless of what LineDown just did,
+	// leaving the final YOffset equal to startOffset (also 0) either way.
+	// Starting the cursor already at the boundary makes the selection change
+	// a no-op, so nothing resets the viewport afterward — a stray LineDown
+	// here has nowhere to hide.
+	t.Run("list focused at the boundary (down): viewport still does not scroll", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusList
+		m.cursor = len(m.views) - 1 // already at the bottom; j must not move it
+		startOffset := m.preview.YOffset
+
+		next, _ := m.Update(down)
+		m = next.(Model)
+
+		if m.cursor != len(m.views)-1 {
+			t.Fatalf("cursor = %d, want unchanged at the boundary %d — fixture must actually be blocked", m.cursor, len(m.views)-1)
+		}
+		if m.preview.YOffset != startOffset {
+			t.Errorf("viewport scrolled to %d while the list had focus (blocked cursor)", m.preview.YOffset)
+		}
+	})
+
+	t.Run("list focused: cursor moves (up), viewport does not scroll", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusList
+		m.cursor = 1 // nonzero, so k has somewhere to move to
+		startOffset := m.preview.YOffset
+
+		next, _ := m.Update(up)
+		m = next.(Model)
+
+		if m.cursor != 0 {
+			t.Errorf("cursor = %d, want 0", m.cursor)
+		}
+		if m.preview.YOffset != startOffset {
+			t.Errorf("viewport scrolled to %d while the list had focus", m.preview.YOffset)
+		}
+	})
+
+	// Up-direction analog of the boundary subtest above.
+	t.Run("list focused at the boundary (up): viewport still does not scroll", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusList
+		m.cursor = 0 // already at the top; k must not move it
+		startOffset := m.preview.YOffset
+
+		next, _ := m.Update(up)
+		m = next.(Model)
+
+		if m.cursor != 0 {
+			t.Fatalf("cursor = %d, want unchanged at the boundary 0 — fixture must actually be blocked", m.cursor)
+		}
+		if m.preview.YOffset != startOffset {
+			t.Errorf("viewport scrolled to %d while the list had focus (blocked cursor)", m.preview.YOffset)
+		}
+	})
+
 	t.Run("preview focused: viewport scrolls, cursor does not move", func(t *testing.T) {
 		m := modelWithOverflowingPreview(t, 3)
 		m.focus = focusPreview
@@ -507,6 +623,39 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 
 		if m.preview.YOffset == 0 {
 			t.Error("viewport did not scroll while the preview had focus")
+		}
+		if m.cursor != startCursor {
+			t.Errorf("cursor moved to %d while the preview had focus", m.cursor)
+		}
+	})
+
+	// The k/Up analog of the subtest above. TestCursorMovementClamps already
+	// sends 'k', but only with the list focused (the default). Previously
+	// nothing in the suite ever sent 'k' or tea.KeyUp with the PREVIEW
+	// focused, so the Up case's LineUp short-circuit could be deleted with
+	// the suite staying green — confirmed by running that mutation against
+	// the pre-this-fix test suite.
+	t.Run("preview focused: k scrolls up, cursor does not move", func(t *testing.T) {
+		m := modelWithOverflowingPreview(t, 3)
+		m.focus = focusPreview
+		m.cursor = 1 // nonzero: an accidental cursor move (mutant fallthrough) is observable
+		startCursor := m.cursor
+
+		// Scroll down first so there is somewhere for k (LineUp) to move from.
+		for i := 0; i < 3; i++ {
+			next, _ := m.Update(down)
+			m = next.(Model)
+		}
+		startOffset := m.preview.YOffset
+		if startOffset == 0 {
+			t.Fatal("fixture must be scrolled down before k is meaningful")
+		}
+
+		next, _ := m.Update(up)
+		m = next.(Model)
+
+		if m.preview.YOffset >= startOffset {
+			t.Errorf("viewport YOffset = %d, want less than %d after k with the preview focused", m.preview.YOffset, startOffset)
 		}
 		if m.cursor != startCursor {
 			t.Errorf("cursor moved to %d while the preview had focus", m.cursor)
@@ -536,6 +685,126 @@ func TestSelectionChangeResetsScrollToTop(t *testing.T) {
 	}
 	if m.preview.YOffset != 0 {
 		t.Errorf("YOffset = %d after a selection change, want 0", m.preview.YOffset)
+	}
+}
+
+// TestSelectionChangeResetsScrollToTopOnUp is the k/Up analog of
+// TestSelectionChangeResetsScrollToTop above. Without it, deleting the Up
+// case's m.preview.GotoTop() call left the whole suite green — nothing
+// exercised a selection change made via k rather than j.
+func TestSelectionChangeResetsScrollToTopOnUp(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	m.cursor = 2 // start on the last row so k below has somewhere to move UP to
+	m.focus = focusPreview
+	for i := 0; i < 3; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = next.(Model)
+	}
+	if m.preview.YOffset == 0 {
+		t.Fatal("fixture must be scrolled before the reset is meaningful")
+	}
+
+	m.focus = focusList
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = next.(Model)
+
+	if m.cursor != 1 {
+		t.Fatalf("cursor = %d — the selection did not actually change", m.cursor)
+	}
+	if m.preview.YOffset != 0 {
+		t.Errorf("YOffset = %d after a selection change via k, want 0", m.preview.YOffset)
+	}
+}
+
+// TestSessionsMsgResetsScrollWhenSelectionChanges and
+// TestSessionsMsgPreservesScrollWhenSelectionUnchanged pin the sessionsMsg
+// case's reset to be conditional on the SessionID under the cursor actually
+// changing across a poll, not on a poll merely happening.
+//
+// The two prior tests (TestSelectionChangeResetsScrollToTop and its Up
+// analog) only ever change the selection via j/k, which already calls
+// GotoTop() directly at the call site — they cannot exercise the sessionsMsg
+// case's own reset at all. A poll can ALSO change the selection: if the
+// selected session exits, reconcile (internal/ui/update.go's reconcile)
+// lands the cursor on a different session while the viewport still has the
+// old session's YOffset, since SetContent only clamps downward.
+func TestSessionsMsgResetsScrollWhenSelectionChanges(t *testing.T) {
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	m = next.(Model)
+	long := strings.Repeat("word ", 400)
+	next, _ = m.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: "s0"}, HasPreview: true, LastAssistant: long},
+		{Session: session.Session{SessionID: "s1"}, HasPreview: true, LastAssistant: long},
+	}})
+	m = next.(Model)
+	if sel := m.selected(); sel == nil || sel.SessionID != "s0" {
+		t.Fatalf("fixture must start with s0 selected, got %v", sel)
+	}
+
+	m.focus = focusPreview
+	for i := 0; i < 3; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = next.(Model)
+	}
+	if m.preview.YOffset == 0 {
+		t.Fatal("fixture must be scrolled before the reset is meaningful")
+	}
+
+	// s0 exits; only s1 remains. reconcile clamps the cursor into range,
+	// landing it on s1 — a genuinely different session, not a refresh of s0.
+	next, _ = m.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: "s1"}, HasPreview: true, LastAssistant: long},
+	}})
+	m = next.(Model)
+
+	if sel := m.selected(); sel == nil || sel.SessionID != "s1" {
+		t.Fatalf("selected session = %v, want s1 (s0 must have exited and s1 taken the cursor)", sel)
+	}
+	if m.preview.YOffset != 0 {
+		t.Errorf("YOffset = %d after the selected session exited and the cursor landed on a different one, want 0", m.preview.YOffset)
+	}
+}
+
+func TestSessionsMsgPreservesScrollWhenSelectionUnchanged(t *testing.T) {
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	m = next.(Model)
+	long := strings.Repeat("word ", 400)
+	next, _ = m.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: "s0"}, HasPreview: true, LastAssistant: long},
+		{Session: session.Session{SessionID: "s1"}, HasPreview: true, LastAssistant: long},
+	}})
+	m = next.(Model)
+	if sel := m.selected(); sel == nil || sel.SessionID != "s0" {
+		t.Fatalf("fixture must start with s0 selected, got %v", sel)
+	}
+
+	m.focus = focusPreview
+	for i := 0; i < 3; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = next.(Model)
+	}
+	startOffset := m.preview.YOffset
+	if startOffset == 0 {
+		t.Fatal("fixture must be scrolled before the preservation is meaningful")
+	}
+
+	// s0 is STILL selected — its own LastAssistant just grew, the ordinary
+	// busy-session poll. This must NOT reset the scroll: resetting here would
+	// yank a reading user back to the top on every ~2s poll.
+	longer := long + strings.Repeat("more ", 200)
+	next, _ = m.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: "s0"}, HasPreview: true, LastAssistant: longer},
+		{Session: session.Session{SessionID: "s1"}, HasPreview: true, LastAssistant: long},
+	}})
+	m = next.(Model)
+
+	if sel := m.selected(); sel == nil || sel.SessionID != "s0" {
+		t.Fatalf("selected session = %v, want s0 (same session must still be selected)", sel)
+	}
+	if m.preview.YOffset != startOffset {
+		t.Errorf("YOffset = %d after a same-session poll, want unchanged at %d", m.preview.YOffset, startOffset)
 	}
 }
 

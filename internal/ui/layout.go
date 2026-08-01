@@ -68,7 +68,10 @@ func bodyPaneHeight(termH int) int { return max(1, termH-footerLines) }
 
 // previewBodyHeight is how many rows the scrollable exchange gets: whatever the
 // preview pane's interior has left after the pinned metadata block. Never
-// negative — viewport.SetContent panics on a negative height.
+// negative — not because SetContent would panic (it does not; verified
+// against bubbles v1.0.0), but because a negative Height inflates
+// maxYOffset() (len(lines) - Height + frame size), letting the viewport
+// scroll past the end of its own content.
 func previewBodyHeight(paneInnerH, metadataLines int) int {
 	h := paneInnerH - metadataLines
 	if h < 0 {

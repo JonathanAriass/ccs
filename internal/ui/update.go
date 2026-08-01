@@ -129,6 +129,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// described. Left uncleared it sits there indefinitely AND changes the
 		// frame height for as long as it does.
 		m.status = ""
+		prevSelID := ""
+		if sel := m.selected(); sel != nil {
+			prevSelID = sel.SessionID
+		}
 		// Carry the selection and the cost figures across the re-sort, and clamp
 		// the cursor when its session has exited. See reconcile.
 		m.views, m.cursor = reconcile(m.views, msg.views, m.cursor)
@@ -136,6 +140,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the pane shows the current exchange rather than the one that was
 		// current when the cursor last moved.
 		m.syncPreview()
+		// Reset scroll ONLY when the poll changed WHICH session is selected —
+		// e.g. the previously selected session exited and reconcile (see above)
+		// landed the cursor on a different one. syncPreview's SetContent clamps
+		// YOffset downward only, so without this the reader would be left
+		// mid-scroll in a session they never chose to look at, unaware they
+		// missed its start.
+		//
+		// This must stay conditional: the common poll is the SAME selected,
+		// often-busy session's own content growing under a reading user.
+		// Resetting unconditionally would yank that reader back to the top
+		// every ~2s (pollInterval) — worse than the bug this fixes.
+		if sel := m.selected(); sel != nil && sel.SessionID != prevSelID {
+			m.preview.GotoTop()
+		}
 		// Refresh the selected row's cost every poll too, not just on cursor
 		// move: a busy session's transcript keeps growing, so its cost should
 		// keep climbing on screen without the user having to nudge the cursor.

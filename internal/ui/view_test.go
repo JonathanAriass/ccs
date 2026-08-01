@@ -192,7 +192,7 @@ func TestViewDimsRowsWithNoTTY(t *testing.T) {
 	// border also happens to use color 240, same as dimRow, and would
 	// otherwise contaminate a substring search over the full joined frame.
 	listW, _ := paneWidths(m.width)
-	raw := m.renderList(listW, max(1, m.height-2))
+	raw := m.renderList(listW, bodyPaneHeight(m.height))
 
 	dimANSI := dimRow.Render("z") // capture this style's actual escape prefix
 	dimPrefix := dimANSI[:strings.Index(dimANSI, "z")]
