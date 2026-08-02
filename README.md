@@ -18,15 +18,19 @@ filters it down to sessions whose process is still actually alive, and lists
 them sorted by urgency: `waiting` first, then `busy`, then `shell`, then
 `idle`. The list re-polls every 2 seconds.
 
-Two panes: sessions on the left, a preview of the selected session on the
-right.
+Two panes: sessions on the left, a scrollable preview of the selected
+session on the right.
 
 | Key | Action |
 |-----|--------|
 | j / k, ↓ / ↑ | move the selection |
+| ⇥ / Tab | switch pane focus; j/k then move whichever pane is focused |
 | ⏎ | jump iTerm2 to the tab/window/pane owning the selected session |
 | r | refresh immediately |
 | q | quit |
+
+⏎, r and q are unaffected by focus — they always act on the selected
+session and the app as a whole, regardless of which pane j/k currently move.
 
 **Live-only.** A session only appears once, and only while its process is
 running. Sessions from the registry whose PID has died, or been reused by an
