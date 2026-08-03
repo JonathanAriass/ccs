@@ -121,7 +121,9 @@ func TestFocusRejectsPlaceholderTTY(t *testing.T) {
 	}
 }
 
-// TestFocusCmdBoundsTheWaitAfterTheDeadline pins the WaitDelay.
+// TestFocusCmdBoundsTheWaitAfterTheDeadline is a fast STRUCTURAL check on
+// focusCmd in isolation: that a WaitDelay is set at all, and that the argv shape
+// TestFocusResolvesArgvPastSeparator depends on is what it thinks it is.
 //
 // The context deadline alone does not bound Focus. .Output() reads stdout
 // through an os.Pipe; if osascript forked a child that inherited the write end,
@@ -129,9 +131,12 @@ func TestFocusRejectsPlaceholderTTY(t *testing.T) {
 // pipe nobody closes. Focus is called synchronously from the TUI's Update, so
 // that is a permanent freeze of the whole UI rather than a slow keypress.
 //
-// That scenario cannot be provoked from a test, so this asserts the field
-// instead: the guarantee has to be structural, and a structural guarantee that
-// nothing checks is one refactor away from being deleted as noise.
+// That END-TO-END guarantee is owned by TestFocusReturnsWhenAForkedChildHoldsStdout,
+// which provokes exactly that scenario through Focus. This test is kept alongside
+// it because it costs 0.00s and gives a sharper message — it names the field —
+// when WaitDelay is deleted outright. It is deliberately the weaker of the two:
+// it only checks `> 0`, so a WaitDelay raised to 60s passes here and is caught
+// by the probe alone.
 func TestFocusCmdBoundsTheWaitAfterTheDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -372,5 +377,88 @@ func TestFocusMoveWaitsForTheCrossProcessLock(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "--- PASS: TestFocusActuallyMovesFocus") {
 		t.Fatalf("child did not actually RUN the focus move (skipped?):\n%s", out.String())
+	}
+}
+
+// writeFakeBin drops an executable shell stub for the probe below.
+func writeFakeBin(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFocusReturnsWhenAForkedChildHoldsStdout provokes the exact scenario the
+// WaitDelay guards, through Focus itself.
+//
+// .Output() collects stdout through an os.Pipe. osascript exits promptly here but
+// leaves a forked child holding that pipe's write end, so cmd.Wait is waiting on
+// an EOF that will not arrive for as long as the child lives. The 5s context buys
+// nothing: it kills a process that already exited and never closes the pipe.
+// Focus runs SYNCHRONOUSLY inside bubbletea's Update, on the single event-loop
+// goroutine, so an unbounded Wait here is a permanent freeze of the TUI — not a
+// slow ⏎, a hang needing ctrl-C. WaitDelay force-closing the pipe is the only
+// thing that returns.
+//
+// This exists because the guarantee was previously pinned only by reading the
+// field off focusCmd. That left inlining focusCmd — a natural "why is this a
+// separate function" cleanup, which its own docstring used to invite — as a
+// silent regression with a green suite. This test goes through Focus, so it
+// reddens on the inline.
+//
+// Hermetic: PATH holds only the two fakes, so it never reaches the real iTerm2,
+// needs no focus lock, and never skips — behaviour is identical with iTerm2
+// running, absent, or in CI.
+//
+// The 4s threshold assumes WaitDelay stays around 1s. Raising WaitDelay
+// legitimately means bumping this number, which is the point: it is the coupling
+// that makes the bound assertable at all.
+func TestFocusReturnsWhenAForkedChildHoldsStdout(t *testing.T) {
+	dir := t.TempDir()
+	argvLog := filepath.Join(dir, "argv")
+	writeFakeBin(t, filepath.Join(dir, "lsappinfo"), "#!/bin/sh\necho \"ASN:0x0-0x1\"\n")
+	// Log argv, answer OK, then fork a child that inherits stdout and outlives
+	// both osascript and the 4s threshold below.
+	writeFakeBin(t, filepath.Join(dir, "osascript"),
+		"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > "+argvLog+
+			"\nprintf 'OK\\n'\n/bin/sleep 8 &\nexit 0\n")
+	t.Setenv("PATH", dir)
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		Focus("ttys017")
+		done <- time.Since(start)
+	}()
+
+	var elapsed time.Duration
+	select {
+	case elapsed = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("Focus did not return within 15s — Wait is blocked on a pipe a forked child holds")
+	}
+
+	// Reading the argv log is what forces execution to have actually happened.
+	// Without it, the elapsed check would pass at 0.00s on any short-circuit —
+	// mutating Focus to return ErrNotFound before the exec lands here instead.
+	raw, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("fake osascript never ran (%v) — this test proved nothing", err)
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("Focus took %v; the stdout pipe is not being force-closed", elapsed)
+	}
+	argv := strings.Fields(string(raw))
+	if len(argv) != 3 {
+		t.Fatalf("osascript argv = %q, want 3 args", argv)
+	}
+	if !strings.HasSuffix(argv[0], "focus.applescript") {
+		t.Errorf("argv[0] = %q, want a path ending in focus.applescript", argv[0])
+	}
+	if argv[1] != "--" {
+		t.Errorf("argv[1] = %q, want %q", argv[1], "--")
+	}
+	if argv[2] != "/dev/ttys017" {
+		t.Errorf("argv[2] = %q, want %q", argv[2], "/dev/ttys017")
 	}
 }

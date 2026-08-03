@@ -34,11 +34,15 @@ func Running() bool {
 
 // focusCmd builds the osascript invocation for one tty.
 //
-// It exists as its own function so the WaitDelay below can be asserted. There is
-// no way to observe it from inside Focus, and the failure it guards against —
-// osascript forking a child that inherits the stdout pipe — cannot be provoked
-// on demand, so without this seam the guarantee would be assumed rather than
-// tested. See TestFocusCmdBoundsTheWaitAfterTheDeadline.
+// It exists as its own function so the WaitDelay below can be asserted directly
+// and cheaply, by TestFocusCmdBoundsTheWaitAfterTheDeadline — a 0.00s structural
+// check that names the field when it changes.
+//
+// Inlining it back into Focus is still a real regression, and the suite will now
+// catch it: TestFocusReturnsWhenAForkedChildHoldsStdout drives the whole guarantee
+// through Focus against a fake osascript that forks a child holding the stdout
+// pipe, so an inlined call that drops WaitDelay reddens there even though the
+// structural check above is untouched.
 func focusCmd(ctx context.Context, script, tty string) *exec.Cmd {
 	// The tty is passed as argv, never interpolated into the script source.
 	cmd := exec.CommandContext(ctx, "osascript", script, "--", "/dev/"+tty)
