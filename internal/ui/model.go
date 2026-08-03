@@ -117,14 +117,16 @@ func tickCmd() tea.Cmd {
 // costCmd looks up one session's token total and cost off the render thread.
 //
 // This MUST be a tea.Cmd, not a direct call inside Update: CostFor is a full
-// transcript scan on its first call for a given file (396ms / 203MB on the
-// real 88MB transcript), and Update runs on bubbletea's single event-loop
-// goroutine — calling it synchronously there would freeze the whole TUI for
-// the length of the scan. Running it as a Cmd also means the 2-second poll's
+// transcript scan on its FIRST call for a given file (508ms / 160MB peak heap
+// on the real 88MB transcript), and Update runs on bubbletea's single
+// event-loop goroutine — calling it synchronously there would freeze the whole
+// TUI for the length of the scan. Later calls resume from the cached offset and
+// fold in only the newly appended records, which is what makes firing this on
+// every poll affordable. Running it as a Cmd also means the 2-second poll's
 // own costCmd (for whatever row is selected when it fires) can be in flight
 // at the same time as a cost lookup from a fresh cursor move; both call into
 // session.CostFor's shared costCache concurrently, which is exactly the race
-// internal/session's costMu guards against.
+// internal/session's costMu and per-path lock guard against.
 func costCmd(v session.View) tea.Cmd {
 	return func() tea.Msg {
 		home, err := os.UserHomeDir()

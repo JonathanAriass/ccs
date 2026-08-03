@@ -1,9 +1,11 @@
 package transcript
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +147,163 @@ func TestCostFallsBackToTopLevelCacheField(t *testing.T) {
 	// which is what virtually all real traffic uses.
 	if u.Cache1h != 500 {
 		t.Fatalf("fallback failed: %+v", u)
+	}
+}
+
+// usageLine builds one assistant record with a distinguishable usage block.
+func usageLine(id, model string, in, out, cacheRead, cacheCreate int64) string {
+	return fmt.Sprintf(`{"type":"assistant","message":{"id":%q,"model":%q,"usage":`+
+		`{"input_tokens":%d,"output_tokens":%d,"cache_read_input_tokens":%d,`+
+		`"cache_creation_input_tokens":%d}}}`, id, model, in, out, cacheRead, cacheCreate)
+}
+
+// TestAccResumeMatchesFullScan grows a transcript ONE BYTE AT A TIME, calling
+// Resume after every single byte, and requires the result to be indistinguishable
+// from one full Cost() of the finished file.
+//
+// Byte-at-a-time is the load-bearing part, not thoroughness for its own sake.
+// Every intermediate state — a record split after its opening brace, in the
+// middle of a number, one byte short of its newline — is a state a real 2-second
+// poll can and does observe, since sessions append while ccs reads. A resume that
+// banks a half-written record moves Offset past bytes it never counted, and the
+// rest of that record is then skipped forever.
+//
+// The cost comparison is `==`, deliberately not an epsilon: records are folded in
+// file order either way, so the float additions happen in an identical sequence
+// and the totals must agree to the last bit. A tolerance would let a single
+// dropped small record slide through.
+func TestAccResumeMatchesFullScan(t *testing.T) {
+	dir := t.TempDir()
+	models := []string{"claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-fable-5"}
+	var sb strings.Builder
+	for i := 0; i < 12; i++ {
+		sb.WriteString(usageLine(fmt.Sprintf("m%d", i), models[i%len(models)],
+			int64(100+i), int64(10+i), int64(1000*i), int64(7*i)))
+		sb.WriteByte('\n')
+	}
+	content := []byte(sb.String())
+
+	full := filepath.Join(dir, "full.jsonl")
+	if err := os.WriteFile(full, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantU, wantC, err := Cost(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantU.Total() == 0 || wantC == 0 {
+		t.Fatalf("fixture proves nothing: full scan totalled %d tokens / %v", wantU.Total(), wantC)
+	}
+
+	grow := filepath.Join(dir, "grow.jsonl")
+	f, err := os.Create(grow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a Acc
+	for i := range content {
+		if _, err := f.Write(content[i : i+1]); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Resume(grow); err != nil {
+			t.Fatalf("Resume after byte %d: %v", i, err)
+		}
+		if a.Offset > int64(i+1) {
+			t.Fatalf("after byte %d the file is %d bytes but Offset is %d — a record was banked before its terminator arrived",
+				i, i+1, a.Offset)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if a.Usage != wantU {
+		t.Errorf("resumed usage != full scan: got %+v want %+v", a.Usage, wantU)
+	}
+	if a.Cost != wantC {
+		t.Errorf("resumed cost != full scan: got %v want %v", a.Cost, wantC)
+	}
+	if a.Offset != int64(len(content)) {
+		t.Errorf("offset = %d, want %d (the whole file is complete, so all of it must be folded in)",
+			a.Offset, len(content))
+	}
+}
+
+// TestAccResumeDedupsAcrossResumeBoundary pins that Acc.seen survives a resume.
+//
+// The same message.id repeats across streamed records, and a poll routinely lands
+// between two of those repeats. If seen were rebuilt per Resume, the second copy
+// would look brand new and its usage would be added a second time — a silent
+// doubling that grows with how often the user watches a busy session.
+func TestAccResumeDedupsAcrossResumeBoundary(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "dup.jsonl")
+	rec := usageLine("dup", "claude-opus-5", 1000, 100, 0, 0)
+	if err := os.WriteFile(p, []byte(rec+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var a Acc
+	if err := a.Resume(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Usage.Total(); got != 1100 {
+		t.Fatalf("first resume: tokens = %d, want 1100", got)
+	}
+
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(rec + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := a.Resume(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Usage.Total(); got != 1100 {
+		t.Errorf("tokens = %d, want 1100 (the duplicate id was counted twice across the resume boundary)", got)
+	}
+}
+
+// TestAccResumeRestartsOnTruncation pins the size-shrink guard.
+//
+// A file smaller than where the last scan stopped is not the file we were
+// accumulating, so every total carried over from it is wrong. Without the reset,
+// Seek past EOF succeeds, the scan reads nothing, and the stale totals are
+// returned forever.
+func TestAccResumeRestartsOnTruncation(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "trunc.jsonl")
+	long := usageLine("a1", "claude-opus-5", 1500, 150, 0, 0) + "\n" +
+		usageLine("a2", "claude-opus-5", 1500, 150, 0, 0) + "\n"
+	if err := os.WriteFile(p, []byte(long), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var a Acc
+	if err := a.Resume(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Usage.Total(); got != 3300 {
+		t.Fatalf("first resume: tokens = %d, want 3300", got)
+	}
+
+	short := usageLine("b1", "claude-opus-5", 50, 5, 0, 0) + "\n"
+	if len(short) >= len(long) {
+		t.Fatalf("fixture bug: the replacement must be SHORTER (%d vs %d)", len(short), len(long))
+	}
+	if err := os.WriteFile(p, []byte(short), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Resume(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Usage.Total(); got != 55 {
+		t.Errorf("tokens = %d, want 55 (stale pre-truncation totals were kept)", got)
+	}
+	if a.Offset != int64(len(short)) {
+		t.Errorf("offset = %d, want %d", a.Offset, len(short))
 	}
 }

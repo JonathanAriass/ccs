@@ -564,3 +564,136 @@ func TestCostForConcurrentAccess(t *testing.T) {
 		}
 	}
 }
+
+// TestCostForResumesInsteadOfRescanning is the load-bearing test for the
+// incremental scan, and it is deliberately not shaped like "CostFor returns the
+// right number" — that assertion passes whether or not the incremental path
+// exists, which is exactly the sort of test this package has been burned by.
+//
+// Instead it makes resume and rescan produce DIFFERENT answers. After the first
+// call has cached an Acc parked at the end of record m1, m1 is overwritten IN
+// PLACE with a poisoned copy of the SAME byte length (so every offset is
+// unchanged) and a second record is appended. Both size and mtime therefore
+// change, so the cache definitely misses and a scan definitely runs:
+//
+//	resume  reads only the tail  -> 1000 + 7 = 1007
+//	rescan  re-reads the poison  -> 9999 + 7 = 10006
+//
+// The answer cannot be produced by a stale cache hit (m2 would be missing, 1000),
+// by the call being skipped (1000), or by a full rescan (10006).
+func TestCostForResumesInsteadOfRescanning(t *testing.T) {
+	home := t.TempDir()
+	cwd, sessionID := "/tmp/cost-resume", "sess-resume"
+	v := View{Session: Session{CWD: cwd, SessionID: sessionID}}
+	p := transcript.Path(home, cwd, sessionID)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m1 := `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":` +
+		`{"input_tokens":1000,"output_tokens":0}}}`
+	if err := os.WriteFile(p, []byte(m1+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { delete(costCache, p) })
+
+	if tokens, _ := CostFor(home, v); tokens != 1000 {
+		t.Fatalf("priming call: got %d tokens, want 1000", tokens)
+	}
+
+	poison := `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":` +
+		`{"input_tokens":9999,"output_tokens":0}}}`
+	if len(poison) != len(m1) {
+		t.Fatalf("fixture bug: the poison must be the same length as m1 (%d vs %d) or the offsets shift and the test proves nothing",
+			len(poison), len(m1))
+	}
+	m2 := `{"type":"assistant","message":{"id":"m2","model":"claude-opus-5","usage":` +
+		`{"input_tokens":7,"output_tokens":0}}}`
+	f, err := os.OpenFile(p, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte(poison), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte(m2+"\n"), int64(len(m1))+1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	tokens, _ := CostFor(home, v)
+	switch tokens {
+	case 1007: // resumed from the cached offset, as required
+	case 10006:
+		t.Errorf("CostFor rescanned from byte 0 (got the poisoned 9999+7); it must resume from the cached offset")
+	default:
+		t.Errorf("got %d tokens, want 1007", tokens)
+	}
+}
+
+// TestCostForSamePathConcurrent hammers ONE path from many goroutines, which is
+// what the per-path lock exists for. `acc := e.acc` copies the struct but SHARES
+// its dedup map, so two goroutines resuming the same cached Acc write one map and
+// the runtime kills the process with "fatal error: concurrent map writes". Both
+// the poll's costCmd and a j/k costCmd target the selected row, so this is a real
+// shape, not a contrived one. Run it under -race.
+//
+// The PRIMING call is the entire setup and must not be "simplified" away: with a
+// cold cache every goroutine starts from a zero Acc, allocates its own map, and
+// nothing collides — a version of this test without priming stays GREEN with the
+// lock deleted. Only a populated entry hands the same map to everyone. The append
+// plus the back-dated cached mtime then guarantee every goroutine takes the miss
+// path rather than returning early on a cache hit.
+//
+// TestCostForConcurrentAccess remains the DISTINCT-path counterpart; the per-path
+// lock does not serialise those, so it still exercises what it was written for.
+func TestCostForSamePathConcurrent(t *testing.T) {
+	home := t.TempDir()
+	cwd, sessionID := "/tmp/cost-same-path", "sess-same-path"
+	v := View{Session: Session{CWD: cwd, SessionID: sessionID}}
+	p := transcript.Path(home, cwd, sessionID)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m1 := `{"type":"assistant","message":{"id":"m1","model":"claude-opus-5","usage":` +
+		`{"input_tokens":1000,"output_tokens":100}}}`
+	if err := os.WriteFile(p, []byte(m1+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { delete(costCache, p) })
+
+	if tokens, _ := CostFor(home, v); tokens != 1100 {
+		t.Fatalf("priming call: got %d tokens, want 1100", tokens)
+	}
+
+	m2 := `{"type":"assistant","message":{"id":"m2","model":"claude-opus-5","usage":` +
+		`{"input_tokens":4000,"output_tokens":411}}}`
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(m2 + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	e, ok := costCache[p]
+	if !ok {
+		t.Fatal("the priming call left no cache entry, so no Acc is shared and this test proves nothing")
+	}
+	e.mtime = e.mtime.Add(-time.Hour)
+	costCache[p] = e
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			CostFor(home, v)
+		}()
+	}
+	wg.Wait()
+
+	if tokens, _ := CostFor(home, v); tokens != 5511 {
+		t.Errorf("got %d tokens, want 5511 (1100 + 4411) — concurrent resumes of one path corrupted the total", tokens)
+	}
+}

@@ -106,11 +106,14 @@ func Collect(registryDir, home string) ([]View, error) {
 			v.LastAssistant = sum.LastAssistant
 			v.HasPreview = sum.LastHuman != "" || sum.LastAssistant != ""
 		}
-		// DELIBERATELY NOT computing cost here. Cost() is a FULL scan — measured at
-		// 396ms and 203MB allocated on the real 88MB transcript. Collect runs on a
-		// 2-second poll across ~15 sessions, so calling it here would be ~6 seconds
-		// of work and gigabytes of allocation every 2 seconds. The TUI would be
-		// unusable and it would burn the battery for nothing.
+		// DELIBERATELY NOT computing cost here. The FIRST cost lookup for a path is
+		// a FULL scan — measured at 508ms and 160MB of peak heap on the real 88MB
+		// transcript. Collect runs on a 2-second poll across ~15 sessions, so
+		// calling it here would be seconds of work and gigabytes of allocation the
+		// first time round, and would keep an Acc alive for every session forever
+		// after. The TUI would be unusable and it would burn the battery for
+		// nothing. (Later lookups resume incrementally and ARE cheap — see CostFor
+		// — but that is per path, and Collect would be paying it for all of them.)
 		//
 		// It is also unnecessary: the list columns are status, name, directory, age
 		// and last message. Cost appears ONLY in the preview pane, for ONE session at
@@ -125,14 +128,29 @@ func Collect(registryDir, home string) ([]View, error) {
 // appends to its transcript constantly, so caching by path alone would go stale;
 // caching on (size, mtime) recomputes exactly when the file has actually changed.
 type costEntry struct {
-	size   int64
-	mtime  time.Time
+	size  int64
+	mtime time.Time
+	// acc is the resumable scan state behind tokens/cost. Keeping it is what
+	// turns a cache MISS from a full rescan into a fold of just the bytes
+	// appended since the last one.
+	acc    transcript.Acc
 	tokens int64
 	cost   float64
 }
 
 var (
 	costCache = map[string]costEntry{}
+	// costPathMu serialises the scans for one path. This is REQUIRED, not an
+	// optimisation: `acc := e.acc` copies the struct but SHARES its dedup map,
+	// so two goroutines resuming the same path would write one map and take the
+	// whole TUI down with "fatal error: concurrent map writes". That is
+	// reachable — the 2-second poll's costCmd and a j/k costCmd both target the
+	// selected row. Distinct paths still scan in parallel.
+	//
+	// It grows one small mutex per transcript ever costed, alongside costCache's
+	// own unbounded growth; at ~15 live sessions that is noise against the
+	// ~160MB scan peak this whole arrangement removes.
+	costPathMu = map[string]*sync.Mutex{}
 	// costMu guards costCache. bubbletea runs tea.Cmds in their own goroutines,
 	// and Task 9 wires CostFor into one: the 2-second poll and a per-selection
 	// cost lookup can both be in flight at once, each potentially populating a
@@ -145,12 +163,28 @@ var (
 	costMu sync.Mutex
 )
 
+// lockPath returns the per-path mutex, creating it on first use.
+func lockPath(p string) *sync.Mutex {
+	costMu.Lock()
+	defer costMu.Unlock()
+	mu, ok := costPathMu[p]
+	if !ok {
+		mu = &sync.Mutex{}
+		costPathMu[p] = mu
+	}
+	return mu
+}
+
 // CostFor returns the token total and cost for one session, computed lazily.
 //
-// This is deliberately NOT part of Collect. Cost() is a full scan (396ms / 203MB on
-// the real 88MB transcript), and Collect runs every 2 seconds across every live
-// session — doing it there would cost seconds per poll to render a number that only
-// the preview pane shows, for one session at a time.
+// This is deliberately NOT part of Collect. The FIRST lookup for a path is a full
+// scan (508ms / 160MB peak heap on the real 88MB transcript), and Collect runs
+// every 2 seconds across every live session — doing it there would cost seconds
+// per poll to render a number that only the preview pane shows, for one session
+// at a time.
+//
+// Subsequent lookups are cheap: the cached transcript.Acc resumes from where the
+// last scan stopped, so a poll folds in only the records appended since it.
 //
 // Call this for the SELECTED row only.
 func CostFor(home string, v View) (int64, float64) {
@@ -159,6 +193,12 @@ func CostFor(home string, v View) (int64, float64) {
 	if err != nil {
 		return 0, 0
 	}
+	// Everything below reads, resumes and rewrites ONE path's entry, and the
+	// resumed Acc shares its dedup map with the cached one. Serialise per path.
+	pmu := lockPath(p)
+	pmu.Lock()
+	defer pmu.Unlock()
+
 	costMu.Lock()
 	// COVERAGE NOTE: the leading `ok &&` is currently unpinnable by any realistic
 	// fixture. A missing map entry yields the zero costEntry{} (size 0, zero
@@ -172,12 +212,17 @@ func CostFor(home string, v View) (int64, float64) {
 	if ok && e.size == st.Size() && e.mtime.Equal(st.ModTime()) {
 		return e.tokens, e.cost
 	}
-	u, c, err := transcript.Cost(p)
-	if err != nil {
+	// A transcript is append-only, so resume from where the last scan stopped
+	// rather than re-reading from byte 0. A zero-valued Acc — which is what a
+	// missing entry yields — scans the whole file, so the first lookup for a
+	// path is still a full scan.
+	acc := e.acc
+	if err := acc.Resume(p); err != nil {
 		return 0, 0
 	}
+	tokens := acc.Usage.Total()
 	costMu.Lock()
-	costCache[p] = costEntry{size: st.Size(), mtime: st.ModTime(), tokens: u.Total(), cost: c}
+	costCache[p] = costEntry{size: st.Size(), mtime: st.ModTime(), acc: acc, tokens: tokens, cost: acc.Cost}
 	costMu.Unlock()
-	return u.Total(), c
+	return tokens, acc.Cost
 }
