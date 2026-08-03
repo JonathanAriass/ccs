@@ -306,10 +306,23 @@ func (m Model) View() string {
 // renderListError draws the list pane in its error state: m.err REPLACES the
 // session list (not the whole screen — the preview pane and legend still
 // render normally around it).
+// The error text is WRAPPED to the pane's interior and then clamped to the rows
+// left under the title, for the reason renderList's own rows are (see
+// listCapacity): lipgloss word-wraps an over-wide line rather than clipping it,
+// and every line past the interior costs the pane its bottom border rather than
+// costing the line. m.err carries a filesystem path — the real one is "open
+// /Users/x/.claude/projects/<long-project-dir>/session-registry.json:
+// permission denied", 124 columns — so this is not a hypothetical: at
+// minTermWidth it wrapped to five lines and broke the frame at heights 8 and 9.
+// The registry being unreadable is exactly when the user needs the frame to
+// still make sense.
 func (m Model) renderListError(width, height int, pane lipgloss.Style) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Sessions"))
-	b.WriteString("\n" + errStyle.Render("error: "+sanitize(m.err.Error())))
+	lines := strings.Split(wrapToWidth("error: "+sanitize(m.err.Error()), paneInnerWidth(width)), "\n")
+	for _, ln := range lines[:min(len(lines), listCapacity(height))] {
+		b.WriteString("\n" + errStyle.Render(ln))
+	}
 	return pane.Width(paneStyleWidth(width)).Height(paneStyleHeight(height)).
 		MaxWidth(width).MaxHeight(height).Render(b.String())
 }

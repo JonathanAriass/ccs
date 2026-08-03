@@ -1178,6 +1178,55 @@ func TestFrameStructurallySoundAcrossHeightSweep(t *testing.T) {
 	}
 }
 
+// realRegistryError is the shape of the error the list pane actually has to
+// render: os.Open's message, carrying a full project path. 124 columns — three
+// lines of wrap at minTermWidth, five once the pane's padding is taken off.
+var realRegistryError = errors.New(
+	"open /Users/x/.claude/projects/-Users-x-Desktop-okt-api--claude-worktrees-OKT-18841/session-registry.json: permission denied")
+
+// TestErrorPaneStaysInsideItsBorder sweeps the list pane's ERROR state over the
+// same heights and widths as the sweep above.
+//
+// Same failure mode, same pane, and it needed the same fix: the error line was
+// written unwrapped and unclamped, so a real registry path wrapped to five
+// lines inside a four-row interior and lipgloss's MaxHeight took the pane's
+// bottom border instead. Measured on the previous commit at minTermWidth,
+// heights 8 and 9.
+//
+// The short error is swept alongside because it is the one that must NOT be
+// clipped — a clamp that renders nothing at all would satisfy the border
+// assertion perfectly.
+func TestErrorPaneStaysInsideItsBorder(t *testing.T) {
+	for name, err := range map[string]error{
+		"short": errors.New("registry unreadable"),
+		"real":  realRegistryError,
+	} {
+		for _, w := range []int{minTermWidth, 60, 100} {
+			for h := minTermHeight; h <= 30; h++ {
+				m := heightSweepModel(liveSessionCount, w, h)
+				m.err = err
+				frame := m.View()
+
+				open := strings.Count(frame, "╭")
+				if closed := strings.Count(frame, "╯"); open != closed || open == 0 {
+					t.Fatalf("%s error, width %d height %d: %d panes opened (╭), %d closed (╯):\n%s",
+						name, w, h, open, closed, frame)
+				}
+				if lines := strings.Split(frame, "\n"); len(lines) > h {
+					t.Fatalf("%s error, width %d height %d: frame is %d lines, want <= %d:\n%s",
+						name, w, h, len(lines), h, frame)
+				}
+				// The error must still be legible, not clamped out of existence:
+				// its first word survives at every size.
+				if !strings.Contains(visibleText(frame), "error:") {
+					t.Fatalf("%s error, width %d height %d: the error is not rendered at all:\n%s",
+						name, w, h, visibleText(frame))
+				}
+			}
+		}
+	}
+}
+
 // TestSelectedRowIsAlwaysOnScreen is the other half of the clamp: a list pane
 // that draws only what fits must never drop the SELECTED row.
 //
