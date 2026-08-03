@@ -82,58 +82,61 @@ func previewBodyHeight(paneInnerH, metadataLines int) int {
 	return h
 }
 
-// previewFits reports whether the preview pane has enough interior room, at
-// terminal height termH, to show at least one row of the actual exchange —
-// not just its pinned metadata block.
+// truncateToWidth clips s to w DISPLAY COLUMNS, marking the cut with an
+// ellipsis.
 //
-// viewport.View() at Height 0 still emits ONE line (lipgloss treats Height(0)
-// as unset — see previewBodyHeight), so the pane's interior needs room for
-// previewMetadataLines PLUS one more row, or the viewport's single emitted
-// line overruns the pane and MaxHeight clips the pane's own bottom border off
-// the frame — a pane that shows zero lines of the exchange (the entire point
-// of the pane) while ALSO breaking the frame around it. Below that threshold,
-// rendering no preview pane at all is strictly better: see
-// (Model).previewVisible, which both View and handleKey consult so they
-// cannot disagree about whether the pane is on screen.
-//
-// previewMetadataLines is defined in view.go, not here — this stays a pure
-// function of termH so it can be pinned directly (TestPreviewFitsThreshold)
-// without building a styled frame.
-func previewFits(termH int) bool {
-	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
-}
-
-// truncateToWidth clips s to w columns, marking the cut with an ellipsis.
+// Columns, not runes — the same distinction wrapToWidth's doc comment makes
+// at length. This function's one caller (formatRow) currently sits behind its
+// own ansi.Truncate safety net, which is the only reason a rune budget here
+// was ever harmless; that stops being true the moment anything calls this
+// without such a net, so it budgets in columns directly rather than relying
+// on a caller to paper over the gap a second time.
 func truncateToWidth(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= w {
-		return s
-	}
-	if w == 1 {
-		return "…"
-	}
-	return string(r[:w-1]) + "…"
+	return ansi.Truncate(s, w, "…")
 }
 
-// elideMiddle shortens a path from the middle, keeping both ends.
+// elideMiddle shortens a path from the middle, keeping both ends, to w
+// DISPLAY COLUMNS.
 //
 // The tail is what distinguishes two sessions in the same repo (a worktree
 // name), so truncating from the right would make them indistinguishable.
 func elideMiddle(s string, w int) string {
-	r := []rune(s)
-	if len(r) <= w || w <= 0 {
+	sw := ansi.StringWidth(s)
+	if sw <= w || w <= 0 {
 		return s
 	}
 	if w <= 3 {
 		return strings.Repeat("…", w)
 	}
 	keep := w - 1
-	head := keep / 2
-	tail := keep - head
-	return string(r[:head]) + "…" + string(r[len(r)-tail:])
+	headW := keep / 2
+	tailW := keep - headW
+
+	// ansi.Truncate rounds DOWN when a grapheme straddles the cut point (drops
+	// it rather than split it), so the head can never come back wider than
+	// headW.
+	head := ansi.Truncate(s, headW, "")
+
+	// ansi.Cut's left boundary is not symmetric with that: when IT lands mid-
+	// grapheme it rounds OUTWARD, keeping the straddling cluster whole rather
+	// than dropping it — so Cut(s, sw-tailW, sw) can hand back MORE than
+	// tailW columns (verified: a 20-rune, all-double-width fixture at w=10
+	// came back 11 columns wide, one column over budget). Walking the left
+	// boundary rightward one column at a time until the slice actually fits
+	// corrects that: each step only drops whichever cluster straddled the
+	// previous boundary, and the loop is bounded (tailLeft can rise at most to
+	// sw, where the slice is empty and trivially fits).
+	tailLeft := sw - tailW
+	tail := ansi.Cut(s, tailLeft, sw)
+	for ansi.StringWidth(tail) > tailW && tailLeft < sw {
+		tailLeft++
+		tail = ansi.Cut(s, tailLeft, sw)
+	}
+
+	return head + "…" + tail
 }
 
 // wrapToWidth hard-wraps s into lines of at most w DISPLAY COLUMNS each, so
@@ -161,10 +164,14 @@ func elideMiddle(s string, w int) string {
 // sequence) across lines. ansi is not lipgloss, so this keeps layout.go free of
 // the lipgloss import.
 //
-// One inherent limit: a single grapheme wider than w cannot be made to fit, so
-// its line is w+1 columns. Unreachable in this program — the preview pane's
-// interior is at least 12 columns at minTermWidth — but worth knowing before
-// this is reused somewhere narrower.
+// One inherent limit: a single grapheme wider than w cannot be made to fit.
+// Measured: wrapToWidth("完", 1) returns "\n完" — ansi.Hardwrap sees curWidth 0
+// + width 2 > limit 1 and starts a new line before placing the grapheme even
+// though curWidth was already 0, so the result is a leading BLANK line
+// followed by the over-wide grapheme's own (2-column) line. That is an extra
+// LINE, not merely a line of w+1 columns. Unreachable in this program — the
+// preview pane's interior is at least 12 columns at minTermWidth — but worth
+// knowing before this is reused somewhere narrower.
 func wrapToWidth(s string, w int) string {
 	if w <= 0 {
 		return s
@@ -295,4 +302,25 @@ func homeAbbrev(path, home string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// previewFits reports whether the preview pane has enough interior room, at
+// terminal height termH, to show at least one row of the actual exchange —
+// not just its pinned metadata block.
+//
+// viewport.View() at Height 0 still emits ONE line (lipgloss treats Height(0)
+// as unset — see previewBodyHeight), so the pane's interior needs room for
+// previewMetadataLines PLUS one more row, or the viewport's single emitted
+// line overruns the pane and MaxHeight clips the pane's own bottom border off
+// the frame — a pane that shows zero lines of the exchange (the entire point
+// of the pane) while ALSO breaking the frame around it. Below that threshold,
+// rendering no preview pane at all is strictly better: see
+// (Model).previewVisible, which both View and handleKey consult so they
+// cannot disagree about whether the pane is on screen.
+//
+// previewMetadataLines is defined in view.go, not here — this stays a pure
+// function of termH so it can be pinned directly (TestPreviewFitsThreshold)
+// without building a styled frame.
+func previewFits(termH int) bool {
+	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
 }

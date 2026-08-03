@@ -31,6 +31,13 @@ func TestPaneWidths(t *testing.T) {
 	}
 }
 
+// TestTruncateToWidth pins DISPLAY-COLUMN behaviour (lipgloss.Width, the same
+// measure wrapToWidth's own tests use — see the import comment above), not
+// rune count. The double-width cases are what a rune budget gets wrong: a
+// budget of runes lets a CJK/emoji string through at up to twice its declared
+// column width, which is the defect wrapToWidth's doc comment describes at
+// length for the wrap path and this function shared until now for the
+// truncate path.
 func TestTruncateToWidth(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -42,10 +49,25 @@ func TestTruncateToWidth(t *testing.T) {
 		{"hi", 1, "…"},
 		{"", 5, ""},
 		{"hello", 0, ""},
+		// All double-width. A rune budget of 6 would keep 5 runes (10 columns)
+		// plus an ellipsis — nearly double the declared width. The real
+		// (column) budget can't fit a 6th double-width rune AND the ellipsis
+		// in the last column, so it stops one rune early rather than split
+		// one: exactly the "rounds under, never over" behaviour ansi.Truncate
+		// already gives formatRow's Version/TTY fields.
+		{strings.Repeat("完", 5), 6, "完完…"},
+		// Exact fit: width equals the budget precisely, so nothing is cut.
+		{strings.Repeat("完", 5), 10, "完完完完完"},
+		// Mixed ascii + emoji, the shape real transcript text takes.
+		{"ascii" + strings.Repeat("✅", 5), 8, "ascii✅…"},
 	}
 	for _, c := range cases {
-		if got := truncateToWidth(c.in, c.w); got != c.want {
+		got := truncateToWidth(c.in, c.w)
+		if got != c.want {
 			t.Errorf("truncateToWidth(%q,%d) = %q want %q", c.in, c.w, got, c.want)
+		}
+		if w := lipgloss.Width(got); w > c.w {
+			t.Errorf("truncateToWidth(%q,%d) = %q, %d display columns, want <= %d", c.in, c.w, got, w, c.w)
 		}
 	}
 }
@@ -65,11 +87,22 @@ func TestElideMiddle(t *testing.T) {
 		// the value below, which is exactly 30 runes and keeps both ends as intended —
 		// only the brief's hand-written "want" was off). Corrected to the true output.
 		{"~/Desktop/okt-api/.claude/worktrees/OKT-18841-detracciones-mx", 30, "~/Desktop/okt-…detracciones-mx"},
+		// All double-width, budget 10. A RUNE budget (the old implementation)
+		// keeps 4 head runes (8 columns) + 5 tail runes (10 columns) + the
+		// ellipsis = 19 display columns for a "10-wide" result — verified
+		// against the old implementation directly, restored only for this
+		// comment. The column-aware version keeps the same shape but measures
+		// in the unit its own contract promises.
+		{strings.Repeat("完", 20), 10, "完完…完完"},
+		// Mixed ascii + CJK: the head and tail land on ascii, so this also
+		// pins that a boundary landing exactly between an ascii and a
+		// double-width run does not miscount either side.
+		{"prefix-" + strings.Repeat("完", 10) + "-suffix", 14, "prefix…-suffix"},
 	}
 	for _, c := range cases {
 		got := elideMiddle(c.in, c.w)
-		if len([]rune(got)) > c.w {
-			t.Errorf("elideMiddle(%q,%d) = %q, too wide (%d)", c.in, c.w, got, len([]rune(got)))
+		if w := lipgloss.Width(got); w > c.w {
+			t.Errorf("elideMiddle(%q,%d) = %q, %d display columns, want <= %d", c.in, c.w, got, w, c.w)
 		}
 		if c.want != "" && got != c.want {
 			t.Errorf("elideMiddle(%q,%d) = %q want %q", c.in, c.w, got, c.want)
@@ -355,6 +388,17 @@ func TestWrapToWidth(t *testing.T) {
 // TotalLineCount (logical lines) reports the content as fitting. Measuring in
 // the consumer's own unit is what makes that impossible rather than merely
 // unlikely.
+//
+// The ZWJ-cluster input below is also the one thing in this file that pins
+// ansi.Hardwrap over ansi.HardwrapWc specifically. Every OTHER input here
+// measures identically under both — GraphemeWidth and WcWidth agree on plain
+// CJK and on "✅" — so swapping wrapToWidth to HardwrapWc left this whole test
+// green until this case was added. A pride-flag sequence
+// (U+1F3F3 U+FE0F U+200D U+1F308) is where the two measures actually disagree:
+// GraphemeWidth (what lipgloss.Width and this test both use) scores it 2
+// columns, WcWidth scores it 1. Verified directly: swapping the call inside
+// wrapToWidth to ansi.HardwrapWc makes THIS input overflow its budget at every
+// width below, while every other input in this table stays unaffected.
 func TestWrapToWidthNeverExceedsItsBudgetInDisplayColumns(t *testing.T) {
 	inputs := []string{
 		strings.Repeat("完了", 100),          // all double-width
@@ -362,6 +406,12 @@ func TestWrapToWidthNeverExceedsItsBudgetInDisplayColumns(t *testing.T) {
 		"ascii " + strings.Repeat("✅", 30), // mixed, emoji
 		strings.Repeat("完了 mixed ", 20),    // interleaved
 		"already\nhas\nlines " + strings.Repeat("完", 40),
+		// ZWJ emoji cluster (pride-flag sequence: white flag U+1F3F3 + VS16
+		// U+FE0F + ZWJ U+200D + rainbow U+1F308), spelled out as explicit
+		// escapes rather than pasted invisible bytes so the sequence stays
+		// legible in source. The only input in this table that distinguishes
+		// Hardwrap from HardwrapWc — see the doc comment above.
+		strings.Repeat("\U0001F3F3\uFE0F\u200D\U0001F308 word ", 30),
 	}
 	for _, w := range []int{4, 12, 36, 80} {
 		for _, in := range inputs {
