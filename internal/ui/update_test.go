@@ -995,25 +995,27 @@ func TestFocusIgnoresStalePolledTTYForAnUnknownPID(t *testing.T) {
 // --- Small-height layout: the preview pane disappears below previewFits'
 // threshold, and focus must not be left pointing at a pane that isn't drawn.
 
-// TestJDoesNotFreezeAfterShrinkingBelowThePreviewThreshold is the regression
-// test for the dead-key hazard: focus the preview pane at a tall terminal,
-// shrink below previewFits' threshold (where View stops drawing a preview
-// pane at all), and press j. Before the previewVisible() guard on Up/Down,
-// m.focus stayed focusPreview across the resize (nothing resets it — see
-// previewVisible's doc comment for why that is deliberate) and j called
-// m.preview.LineUp/LineDown on a viewport nothing on screen shows — a key
-// that visibly does nothing, which reads as a frozen app.
+// shrunkBelowThePreviewThreshold returns a 3-session model with the cursor at
+// the given index, the preview pane FOCUSED, scrolled away from the top, and
+// the terminal then resized one row below previewFits' threshold — the exact
+// state the dead-key hazard lives in.
 //
-// Starts from cursor 0 with 3 sessions specifically so the list CAN move:
-// asserting "the cursor moved" from a position already at a boundary would
-// hold even with the dead-key bug present, proving nothing.
-func TestJDoesNotFreezeAfterShrinkingBelowThePreviewThreshold(t *testing.T) {
+// Every step is asserted rather than assumed: if the preview were already
+// invisible at the starting size, or focus did not survive the resize, or the
+// viewport never scrolled, the tests below would be asserting against a state
+// their own mutants also produce.
+func shrunkBelowThePreviewThreshold(t *testing.T, cursor int) Model {
+	t.Helper()
 	m := modelWithOverflowingPreview(t, 3)
-	m.cursor = 0
-	m.focus = focusPreview
 	if !m.previewVisible() {
 		t.Fatal("fixture: preview must be visible at the starting (tall) size")
 	}
+	// Scroll through the real key path while the preview is still visible.
+	// A viewport at offset 0 makes every "did not scroll" assertion below
+	// unfalsifiable in the up direction, since LineUp clamps at 0.
+	m = scrolledPreview(t, m, 3)
+	m.cursor = cursor
+	m.focus = focusPreview
 
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13}) // one below the threshold
 	m = next.(Model)
@@ -1023,18 +1025,87 @@ func TestJDoesNotFreezeAfterShrinkingBelowThePreviewThreshold(t *testing.T) {
 	if m.focus != focusPreview {
 		t.Fatal("fixture: focus must still read focusPreview after the resize — a resize does not touch m.focus")
 	}
-
-	startOffset := m.preview.YOffset
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m = next.(Model)
-
-	if m.cursor != 1 {
-		t.Errorf("cursor = %d after j with an invisible preview focused, want 1 — "+
-			"the list must move regardless of m.focus", m.cursor)
+	if m.preview.YOffset == 0 {
+		t.Fatal("fixture: the viewport must still be scrolled after the resize")
 	}
-	if m.preview.YOffset != startOffset {
-		t.Errorf("preview YOffset changed from %d to %d — j scrolled a pane nothing on screen shows",
-			startOffset, m.preview.YOffset)
+	return m
+}
+
+// TestJAndKDoNotFreezeAfterShrinkingBelowThePreviewThreshold is the regression
+// test for the dead-key hazard: focus the preview pane at a tall terminal,
+// shrink below previewFits' threshold (where View stops drawing a preview pane
+// at all), and press j or k. Before the previewVisible() guard on Up/Down,
+// m.focus stayed focusPreview across the resize (nothing resets it — see
+// previewVisible's doc comment for why that is deliberate) and the key called
+// m.preview.LineUp/LineDown on a viewport nothing on screen shows — a key that
+// visibly does nothing, which reads as a frozen app.
+//
+// BOTH DIRECTIONS, because they are two separate guards in update.go and only
+// one of them was covered: this test sent nothing but 'j' while its comment
+// claimed to describe LineUp and LineDown alike, and dropping the
+// previewVisible() call from the Up branch left the whole suite green.
+//
+// Each direction starts from a cursor that CAN move that way — 0 for j, 2 for
+// k. Asserting "the cursor moved" from a position already at that boundary
+// would hold with the bug fully present, proving nothing.
+func TestJAndKDoNotFreezeAfterShrinkingBelowThePreviewThreshold(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        tea.KeyMsg
+		start, end int
+	}{
+		{"j", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, 0, 1},
+		{"k", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, 2, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shrunkBelowThePreviewThreshold(t, c.start)
+
+			next, _ := m.Update(c.key)
+			m = next.(Model)
+
+			if m.cursor != c.end {
+				t.Errorf("cursor = %d after %s with an invisible preview focused, want %d — "+
+					"the list must move regardless of m.focus", m.cursor, c.name, c.end)
+			}
+		})
+	}
+}
+
+// TestJAndKDoNotScrollAnInvisiblePreview is the other half, and it needs its own
+// fixture: a cursor that MOVES triggers syncPreview()+GotoTop(), which parks the
+// viewport at 0 whatever a stray LineUp/LineDown did on the way, so the test
+// above cannot see a phantom scroll at all.
+//
+// Starting at the boundary for each direction makes the cursor move a no-op, so
+// nothing resets the viewport and a scroll of a pane that is not on screen has
+// nowhere to hide.
+func TestJAndKDoNotScrollAnInvisiblePreview(t *testing.T) {
+	cases := []struct {
+		name   string
+		key    tea.KeyMsg
+		cursor int
+	}{
+		{"j", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, 2}, // already at the bottom
+		{"k", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, 0}, // already at the top
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shrunkBelowThePreviewThreshold(t, c.cursor)
+			startOffset := m.preview.YOffset
+
+			next, _ := m.Update(c.key)
+			m = next.(Model)
+
+			if m.cursor != c.cursor {
+				t.Fatalf("cursor = %d, want unchanged at the boundary %d — the fixture must actually be blocked",
+					m.cursor, c.cursor)
+			}
+			if m.preview.YOffset != startOffset {
+				t.Errorf("preview YOffset changed from %d to %d — %s scrolled a pane nothing on screen shows",
+					startOffset, m.preview.YOffset, c.name)
+			}
+		})
 	}
 }
 

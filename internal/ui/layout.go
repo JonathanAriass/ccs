@@ -143,11 +143,13 @@ func previewBodyHeight(paneInnerH, metadataLines int) int {
 // ellipsis.
 //
 // Columns, not runes — the same distinction wrapToWidth's doc comment makes
-// at length. This function's one caller (formatRow) currently sits behind its
-// own ansi.Truncate safety net, which is the only reason a rune budget here
-// was ever harmless; that stops being true the moment anything calls this
-// without such a net, so it budgets in columns directly rather than relying
-// on a caller to paper over the gap a second time.
+// at length. Both of formatRow's call sites sit behind its own ansi.Truncate
+// safety net, which is the only reason a rune budget here was ever harmless;
+// that stops being true the moment anything calls this without such a net, so
+// it budgets in columns directly rather than relying on a caller to paper over
+// the gap a second time. Note the net bounds the ROW, not this function's
+// result: a rune budget here would still cost the fields drawn after it (see
+// formatRow's own comment).
 func truncateToWidth(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -376,8 +378,8 @@ func homeAbbrev(path, home string) string {
 // cannot disagree about whether the pane is on screen.
 //
 // previewMetadataLines is defined in view.go, not here — this stays a pure
-// function of termH so it can be pinned directly (TestPreviewFitsThreshold)
-// without building a styled frame.
+// function of termH so it can be pinned directly
+// (TestPreviewFitsThresholdIsExactlyHeight14) without building a styled frame.
 func previewFits(termH int) bool {
 	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
 }

@@ -236,32 +236,111 @@ func TestViewDimsRowsWithNoTTY(t *testing.T) {
 	}
 }
 
+// rowMsgMarker leads every fixture's last-message field below, so a test can
+// tell whether the message column survived at all — as opposed to being shoved
+// off the end of the row by a field that overran its own budget.
+const rowMsgMarker = "MSGSTART"
+
+// formatRowFixtures are the field combinations formatRow has to survive. All
+// carry an age (3 hours) and a message, both of which a correct row keeps
+// visible at the widths swept below.
+//
+// WHICH FIELD holds the double-width text is the whole point, and getting that
+// wrong is what disarmed this file's own safety net for a whole commit. Until
+// now every fixture here put its wide runes in LastAssistant — the LAST field,
+// with no padding after it — so once truncateToWidth began clipping by DISPLAY
+// COLUMNS (commit abc3fab) nothing in the suite could reach formatRow's
+// ansi.Truncate net any more, and deleting that net left the whole suite green
+// while a real row still overflowed.
+//
+// Name and CWD are the fields that still reach it, for a reason worth stating:
+// Go's %-*s verb pads by RUNES while those two are now clipped by COLUMNS, so a
+// column-clamped CJK field comes back with roughly nameW/2 surplus spaces
+// appended. Measured on a 54-column row without the net: 60 columns for a CJK
+// name, 57 for a CJK CWD, 63 for both, 60 for an emoji name.
+func formatRowFixtures() map[string]session.View {
+	base := func(name, cwd, msg string) session.View {
+		return session.View{
+			Session: session.Session{
+				Name:            name,
+				CWD:             cwd,
+				Status:          "busy",
+				StatusUpdatedAt: time.Now().Add(-3 * time.Hour).UnixMilli(),
+			},
+			LastAssistant: rowMsgMarker + " " + msg,
+		}
+	}
+	// Entirely double-width runes: a rune-count budget of N measures as ~2N
+	// display columns, so any shortfall shows up clearly regardless of exactly
+	// where the cut falls. The paths are long enough that elideMiddle has
+	// something to elide — a CWD already inside its budget is passed through
+	// untouched and cannot tell a correct elideMiddle from a missing one.
+	const wideName = "完了完了完了完了完了完了完了完了"
+	const widePath = "/仕事/プロジェクト/深い/階層/作業/木/現在"
+	const longPath = "/Users/x/Desktop/okt-api/.claude/worktrees/OKT-18841-detracciones-mx"
+	return map[string]session.View{
+		"ascii":                     base("session-name", longPath, strings.Repeat("word ", 40)),
+		"double-width message":      base("session-name", longPath, strings.Repeat("完", 80)),
+		"double-width name":         base(wideName, longPath, strings.Repeat("word ", 40)),
+		"double-width cwd":          base("session-name", widePath, strings.Repeat("word ", 40)),
+		"double-width name and cwd": base(wideName, widePath, strings.Repeat("word ", 40)),
+		"emoji name":                base(strings.Repeat("✅", 16), longPath, strings.Repeat("word ", 40)),
+	}
+}
+
 // TestFormatRowNeverExceedsItsWidthBudgetInDisplayColumns is a regression
 // test for a bug found by running View() against real (read-only) session
 // registry data: a transcript reply containing a double-width rune ("✅")
-// pushed a real row's DISPLAY width past its budget even though
-// truncateToWidth's RUNE-count budget looked correct — layout.go's
-// truncateToWidth/elideMiddle (by design, per the brief) budget in runes, not
-// display columns. lipgloss.Style.Width() word-wraps a line that overflows
-// its declared width rather than clipping it, so that one too-wide row
-// silently became two screen lines in the real render and shoved every row
-// below it out of place (confirmed live: fixed, then re-ran against the same
-// registry data and the corruption was gone). formatRow's ansi.Truncate
-// safety net is what's supposed to prevent this — this test pins that
-// contract directly, in display columns, independent of how many rows lipgloss
-// happens to need before it decides to wrap in a full render.
+// pushed a real row's DISPLAY width past its budget. lipgloss.Style.Width()
+// word-wraps a line that overflows its declared width rather than clipping it,
+// so that one too-wide row silently became two screen lines in the real render
+// and shoved every row below it out of place (confirmed live: fixed, then
+// re-ran against the same registry data and the corruption was gone).
+// formatRow's ansi.Truncate safety net is what prevents this — this test pins
+// that contract directly, in display columns, independent of how many rows
+// lipgloss happens to need before it decides to wrap in a full render.
+//
+// Swept over every width the layout can hand a row rather than the single
+// width 54 it used to check, starting at 0: a degenerate budget is what a
+// narrow pane produces, and it is where an off-by-one in rowWidths would land.
 func TestFormatRowNeverExceedsItsWidthBudgetInDisplayColumns(t *testing.T) {
-	v := session.View{
-		Session: session.Session{Name: "n", CWD: "/tmp/proj", Status: "busy"},
-		// Entirely double-width runes: a rune-count budget of N runes
-		// measures as ~2N display columns, so any budget shortfall shows up
-		// clearly regardless of exactly where truncateToWidth's cut falls.
-		LastAssistant: strings.Repeat("完", 80),
+	now := time.Now()
+	for name, v := range formatRowFixtures() {
+		for width := 0; width <= 120; width++ {
+			row := formatRow(v, "", now, width)
+			if w := lipgloss.Width(row); w > width {
+				t.Errorf("%s: formatRow at width %d returned a row %d columns wide: %q",
+					name, width, w, visibleText(row))
+				break
+			}
+		}
 	}
+}
+
+// TestFormatRowKeepsLaterFieldsOnTheRow pins the OTHER half of the row's
+// contract, which the width sweep above cannot reach: no field may spend
+// another field's budget.
+//
+// The width sweep is satisfied by any row that fits, including one where an
+// unclamped Name ran to 80 columns and the safety net then clipped the age and
+// the message off the end entirely. That is precisely what happens with
+// truncateToWidth or elideMiddle removed from formatRow — the row still "fits",
+// and every width assertion in this file stays green, while the age column (the
+// one that says whether a session is stale) and the message have silently
+// vanished from the screen. So this asserts they are still there.
+func TestFormatRowKeepsLaterFieldsOnTheRow(t *testing.T) {
 	const width = 54
-	row := formatRow(v, "", time.Now(), width)
-	if w := lipgloss.Width(row); w > width {
-		t.Errorf("formatRow returned a row %d columns wide, want <= %d: %q", w, width, row)
+	now := time.Now()
+	for name, v := range formatRowFixtures() {
+		row := visibleText(formatRow(v, "", now, width))
+		if !strings.Contains(row, "3h") {
+			t.Errorf("%s: the age column is gone from %q — an earlier field overran its budget",
+				name, row)
+		}
+		if !strings.Contains(row, rowMsgMarker) {
+			t.Errorf("%s: the last-message column is gone from %q — an earlier field overran its budget",
+				name, row)
+		}
 	}
 }
 
@@ -299,8 +378,9 @@ func busyFrameModel(width, height int, status string) Model {
 				StatusUpdatedAt: 1785322956268,
 			},
 			TTY: "ttys017",
-			// Double-width runes: the row budget is counted in runes, so CJK text
-			// is what turns a "correct" budget into an overflowing line.
+			// Double-width runes: fields are clipped by display column but
+			// padded by rune (see formatRow's safety net), so CJK text is what
+			// turns a "correct" budget into an overflowing line.
 			LastAssistant: strings.Repeat("完了", 40),
 			LastHuman:     strings.Repeat("please do the thing ", 8),
 			HasPreview:    true,
@@ -671,12 +751,19 @@ func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
 		Tokens:  123456789,
 		Cost:    12345.678,
 	}
-	// Every line renderPreviewMetadata emits from a field, with the value it
+	// EVERY line renderPreviewMetadata puts through `fit`, with the content it
 	// would carry if nothing clamped it.
+	//
+	// "main thread" is not a previewField and enumerating only the five that are
+	// is how this list came to have, on its first outing, exactly the
+	// one-directional gap it was written to close: over-clamping that one line
+	// by three columns survived the whole suite, while the identical mutation on
+	// the Status line was killed. Anything `fit` touches belongs here.
 	unclamped := []string{
 		previewField("Status", v.Status),
 		previewField("Version", v.Version),
 		previewField("TTY", v.TTY),
+		labelStyle.Render("main thread"),
 		previewField("Tokens", fmt.Sprintf("%d", v.Tokens)),
 		previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)),
 	}
@@ -722,6 +809,47 @@ func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
 	}
 	if !strings.Contains(legend, "up") {
 		t.Errorf("the elided legend must still show the first bindings, got %q", legend)
+	}
+}
+
+// TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo pins the
+// legend against the layout actually on screen, in both directions.
+//
+// Below previewFits' threshold Tab is a deliberate no-op (see
+// TestTabIsNoOpWhenPreviewNotVisible), so a legend still offering "switch pane"
+// there names a key that does nothing. The reject half alone would be satisfied
+// by dropping the binding altogether, which is why the accept half is here too.
+//
+// The legend is read at a width where nothing is elided: at minTermWidth
+// bubbles drops trailing bindings for room, and "switch pane" missing because
+// the line was too short is a different fact from it being disabled.
+func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) {
+	for _, c := range []struct {
+		height int
+		want   bool
+	}{
+		{20, true},  // two-pane: Tab switches
+		{14, true},  // the threshold itself
+		{13, false}, // one row below it: list-only, Tab is a no-op
+		{minTermHeight, false},
+	} {
+		m := heightSweepModel(liveSessionCount, 100, c.height)
+		if got := m.previewVisible(); got != c.want {
+			t.Fatalf("height %d: fixture's previewVisible() = %v, want %v", c.height, got, c.want)
+		}
+		lines := strings.Split(visibleText(m.View()), "\n")
+		legend := lines[len(lines)-1]
+		if got := strings.Contains(legend, "switch pane"); got != c.want {
+			t.Errorf("height %d: legend advertises \"switch pane\" = %v, want %v (preview visible = %v): %q",
+				c.height, got, c.want, c.want, strings.TrimRight(legend, " "))
+		}
+		// The rest of the legend must survive either way — disabling one
+		// binding must not take the others with it.
+		for _, still := range []string{"up", "down", "focus tab", "refresh", "quit"} {
+			if !strings.Contains(legend, still) {
+				t.Errorf("height %d: legend lost %q: %q", c.height, still, strings.TrimRight(legend, " "))
+			}
+		}
 	}
 }
 

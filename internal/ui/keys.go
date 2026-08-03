@@ -46,6 +46,27 @@ func (k keyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Quit}
 }
 
+// shortHelpFor is ShortHelp for the layout actually on screen: below
+// previewFits' threshold there is no second pane, so handleKey makes Tab a
+// deliberate no-op — and a legend still advertising "⇥ switch pane" there
+// promises a key that does nothing. On the short terminal where this happens
+// the legend is being elided for width anyway, so the binding is also the one
+// costing room the others could use.
+//
+// previewVisible is passed in rather than recomputed so this cannot disagree
+// with what View drew or with how handleKey routed the key — the same
+// single-predicate discipline previewVisible's own doc comment describes.
+//
+// The receiver is a value, so SetEnabled mutates this copy only and the
+// model's own bindings are untouched; disabled bindings are what
+// help.Model.ShortHelpView skips.
+func (k keyMap) shortHelpFor(previewVisible bool) []key.Binding {
+	if !previewVisible {
+		k.Cycle.SetEnabled(false)
+	}
+	return k.ShortHelp()
+}
+
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{{k.Up, k.Down}, {k.Cycle, k.Focus, k.Refresh}, {k.Quit}}
 }

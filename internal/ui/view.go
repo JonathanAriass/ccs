@@ -95,17 +95,28 @@ func formatRow(v session.View, home string, now time.Time, width int) string {
 
 	row := fmt.Sprintf("%s %-*s %-*s %*s %s", glyph, nameW, name, dirW, dir, ageWidth, age, msg)
 
-	// Safety net: truncateToWidth/elideMiddle budget in RUNES, not display
-	// columns (that's what layout.go's own tests pin). Transcript text is
-	// real user content and can contain double-width runes (CJK, emoji —
-	// verified against the live registry: an assistant reply containing "✅"
-	// is exactly this), which makes the rune-budgeted row wider on screen
-	// than the pane. lipgloss.Style.Width() word-WRAPS an overflowing line
-	// rather than clipping it, so a single too-wide row silently becomes two
-	// screen lines and shoves every row below it out of place. ansi.Truncate
-	// hard-clips by real display width (ANSI-aware, so the glyph's own color
-	// codes are measured correctly), guaranteeing every row is exactly one
-	// screen line regardless of what a transcript happens to contain.
+	// Safety net, and it is still load-bearing even though every field above
+	// is now clipped to DISPLAY COLUMNS (layout.go's own tests pin that).
+	//
+	// The reason is the Sprintf above: Go's %-*s verb pads to a width counted
+	// in RUNES. So name and dir are clipped by columns and then padded by
+	// runes, and a field of double-width runes — CJK, emoji; verified against
+	// the live registry, where an assistant reply containing "✅" is exactly
+	// this — comes back from %-*s with roughly nameW/2 surplus spaces
+	// appended. Measured on a 54-column row without this net: 60 columns for a
+	// CJK name, 57 for a CJK CWD, 63 for both.
+	//
+	// That matters because lipgloss.Style.Width() word-WRAPS an overflowing
+	// line rather than clipping it, so a single too-wide row silently becomes
+	// two screen lines and shoves every row below it out of place.
+	// ansi.Truncate hard-clips by real display width (ANSI-aware, so the
+	// glyph's own color codes are measured correctly), guaranteeing every row
+	// is exactly one screen line regardless of what a transcript contains.
+	//
+	// It does NOT make the per-field clips redundant: with the row bounded
+	// here, a field that overran its budget costs the fields AFTER it — the
+	// age and the message get clipped off the end instead. See
+	// TestFormatRowKeepsLaterFieldsOnTheRow, which is what pins those.
 	return ansi.Truncate(row, width, "")
 }
 
@@ -287,7 +298,7 @@ func (m Model) View() string {
 	}
 	h := help.New()
 	h.Width = m.width
-	footer.WriteString(ansi.Truncate(h.ShortHelpView(m.keys.ShortHelp()), m.width, ""))
+	footer.WriteString(ansi.Truncate(h.ShortHelpView(m.keys.shortHelpFor(m.previewVisible())), m.width, ""))
 
 	return lipgloss.JoinVertical(lipgloss.Left, body, footer.String())
 }
