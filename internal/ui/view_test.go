@@ -622,8 +622,17 @@ func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
 			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 			m = next.(Model)
 			next, _ = m.Update(sessionsMsg{views: []session.View{{
+				// Every value here is deliberately long enough to reach the
+				// pane's inner width at narrow terminals, so all of
+				// renderPreviewMetadata's clamps are actually exercised. With
+				// Tokens: 0 / Cost: $0.00 and a 7-column TTY these lines were
+				// only 9-12 columns wide, so the TTY, Tokens and "main thread"
+				// clamps could each be deleted — or every field over-clamped by
+				// three columns — with the whole suite still green.
 				Session:    session.Session{SessionID: "s0", Status: "waiting", Version: "2.1.220"},
-				TTY:        "ttys017",
+				TTY:        "ttys017-nested-inner",
+				Tokens:     123456789,
+				Cost:       12345.678,
 				HasPreview: true,
 				LastHuman:  "hi",
 			}}})
@@ -640,6 +649,57 @@ func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
 					t.Fatalf("%s, width %d focus %v: frame has %d bottom-right pane corners (╯), want 2 — a pane's bottom border is missing:\n%s",
 						name, w, focus, got, frame)
 				}
+			}
+		}
+	}
+}
+
+// TestPreviewMetadataIsClampedButNotOverClamped pins renderPreviewMetadata's
+// clamp from BOTH sides.
+//
+// The border sweep above only proves the clamp is not too LOOSE — every line
+// fits, so no line pushes the pane past its border. It says nothing about the
+// clamp being too TIGHT: subtracting three columns inside `fit` truncates every
+// metadata value three characters early and the whole suite stays green,
+// because nothing asserts that a field which FITS is rendered in full. That is
+// this project's recurring shape — a guard whose only test constrains one
+// direction — so this test pins the other one.
+func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
+	v := session.View{
+		Session: session.Session{SessionID: "s0", Status: "waiting", Version: "2.1.220"},
+		TTY:     "ttys017-nested-inner",
+		Tokens:  123456789,
+		Cost:    12345.678,
+	}
+	// Every line renderPreviewMetadata emits from a field, with the value it
+	// would carry if nothing clamped it.
+	unclamped := []string{
+		previewField("Status", v.Status),
+		previewField("Version", v.Version),
+		previewField("TTY", v.TTY),
+		previewField("Tokens", fmt.Sprintf("%d", v.Tokens)),
+		previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)),
+	}
+
+	for innerW := 1; innerW <= 60; innerW++ {
+		m := New()
+		m.views = []session.View{v}
+		rendered := m.renderPreviewMetadata(&m.views[0], innerW)
+
+		for _, line := range strings.Split(rendered, "\n") {
+			if got := ansi.StringWidth(line); got > innerW {
+				t.Fatalf("innerW=%d: metadata line %q is %d display columns, want <= %d — clamp too loose",
+					innerW, visibleText(line), got, innerW)
+			}
+		}
+		// The other direction: any field that fits must appear untouched.
+		for _, full := range unclamped {
+			if ansi.StringWidth(full) > innerW {
+				continue // legitimately clamped at this width
+			}
+			if !strings.Contains(rendered, full) {
+				t.Fatalf("innerW=%d: %q is only %d columns and fits, but is not rendered intact — clamp too tight:\n%s",
+					innerW, visibleText(full), ansi.StringWidth(full), visibleText(rendered))
 			}
 		}
 	}
