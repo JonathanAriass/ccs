@@ -1,10 +1,17 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
+	// lipgloss is deliberately absent from layout.go itself (the pane math must
+	// not depend on the rendering library), but the width assertions below
+	// measure wrapToWidth's output the way its CONSUMER does — and its consumer
+	// is a viewport rendered through lipgloss. Asserting in any other unit would
+	// be asserting against the wrong authority.
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestPaneWidths(t *testing.T) {
@@ -287,6 +294,15 @@ func TestWrapToWidth(t *testing.T) {
 		{"exact width unchanged", "hello", 5, "hello"},
 		{"wraps at width", "hello world", 5, "hello\n worl\nd"},
 		{"zero width returns input unchanged", "hello", 0, "hello"},
+		// The budget is DISPLAY COLUMNS, not runes. Three double-width runes
+		// are 6 columns, so a 6-column budget takes exactly three of them per
+		// line — a rune budget would take six and produce a 12-column line.
+		{"double-width runes wrap by column, not by rune", strings.Repeat("完", 6), 6, "完完完\n完完完"},
+		// An odd budget cannot be filled exactly by double-width runes: the
+		// line stops one column short rather than spilling one over.
+		{"double-width runes never straddle the budget", strings.Repeat("完", 4), 5, "完完\n完完"},
+		// Mixed width, wrapping mid-run.
+		{"mixed narrow and wide", "ab完cd", 4, "ab完\ncd"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -294,5 +310,37 @@ func TestWrapToWidth(t *testing.T) {
 				t.Errorf("wrapToWidth(%q,%d) = %q want %q", c.in, c.w, got, c.want)
 			}
 		})
+	}
+}
+
+// TestWrapToWidthNeverExceedsItsBudgetInDisplayColumns is the property the
+// table above spells out by example, asserted the way the CONSUMER measures.
+//
+// wrapToWidth's output goes straight into a viewport whose Width and whose
+// lipgloss rendering both budget in display columns (ansi.StringWidth, which is
+// what lipgloss.Width calls). A rune-budgeted wrap satisfies every "does it
+// look right" table above with ASCII and still hands the viewport lines twice
+// the pane's width the moment a transcript contains CJK or emoji — lipgloss
+// re-wraps each onto two screen rows and MaxHeight clips the surplus, while
+// TotalLineCount (logical lines) reports the content as fitting. Measuring in
+// the consumer's own unit is what makes that impossible rather than merely
+// unlikely.
+func TestWrapToWidthNeverExceedsItsBudgetInDisplayColumns(t *testing.T) {
+	inputs := []string{
+		strings.Repeat("完了", 100),          // all double-width
+		strings.Repeat("word ", 40),        // all single-width
+		"ascii " + strings.Repeat("✅", 30), // mixed, emoji
+		strings.Repeat("完了 mixed ", 20),    // interleaved
+		"already\nhas\nlines " + strings.Repeat("完", 40),
+	}
+	for _, w := range []int{4, 12, 36, 80} {
+		for _, in := range inputs {
+			for i, line := range strings.Split(wrapToWidth(in, w), "\n") {
+				if got := lipgloss.Width(line); got > w {
+					t.Errorf("wrapToWidth(_, %d): line %d is %d display columns: %q",
+						w, i, got, line)
+				}
+			}
+		}
 	}
 }

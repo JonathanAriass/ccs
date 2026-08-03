@@ -398,6 +398,25 @@ func TestFocusOnEmptyListIsNoop(t *testing.T) {
 	}
 }
 
+// previewHumanMarker / previewAssistantMarker are the tokens that identify
+// WHOSE exchange the preview pane is showing.
+//
+// Every session in modelWithOverflowingPreview used to be handed the same
+// strings.Repeat("word ", 400) for both fields, which made all of them
+// byte-identical — and an identical fixture cannot answer the one question the
+// preview pane exists to answer. Both syncPreview() calls on the cursor-move
+// paths could be deleted with the whole suite green, while the running program
+// showed the newly selected session's metadata (rendered live from
+// m.selected()) above the PREVIOUS session's words (still sitting in
+// m.preview), for up to a poll interval.
+//
+// The human marker leads the exchange, so it is on screen at YOffset 0 without
+// scrolling. The two markers differ because the assistant's text is what a LIST
+// ROW shows (lastMessage), so a single shared token could be matched in the
+// list and mistaken for evidence about the preview.
+func previewHumanMarker(i int) string     { return fmt.Sprintf("HUMAN-%d-MARKER", i) }
+func previewAssistantMarker(i int) string { return fmt.Sprintf("ASSISTANT-%d-MARKER", i) }
+
 // modelWithOverflowingPreview builds a model the way the program does — through
 // Update — so the viewport's size and content come from production code rather
 // than from the test.
@@ -407,16 +426,18 @@ func TestFocusOnEmptyListIsNoop(t *testing.T) {
 // flow ever sizes or fills that viewport. Sizing it in View (which has a value
 // receiver, so its writes are discarded) leaves the live model at Height 0
 // where LineDown is a no-op — and every hand-built test stays green.
+//
+// Every session's exchange is DISTINCT (see previewHumanMarker) and long enough
+// to overflow the pane; several tests depend on both properties.
 func modelWithOverflowingPreview(t *testing.T, n int) Model {
 	t.Helper()
-	long := strings.Repeat("word ", 400)
 	views := make([]session.View, n)
 	for i := range views {
 		views[i] = session.View{
 			Session:       session.Session{SessionID: fmt.Sprintf("s%d", i)},
 			HasPreview:    true,
-			LastHuman:     long,
-			LastAssistant: long,
+			LastHuman:     previewHumanMarker(i) + " " + strings.Repeat("word ", 400),
+			LastAssistant: previewAssistantMarker(i) + " " + strings.Repeat("reply ", 400),
 		}
 	}
 	m := New()
@@ -429,6 +450,65 @@ func modelWithOverflowingPreview(t *testing.T, n int) Model {
 			m.preview.TotalLineCount(), m.preview.Height)
 	}
 	return m
+}
+
+// previewShows reports whether the preview pane's scrolling body currently
+// renders token. It reads m.preview.View() — the body alone — rather than the
+// whole frame, because the list pane renders every session's last assistant
+// message too and a whole-frame search would match a row instead.
+func previewShows(m Model, token string) bool {
+	return strings.Contains(visibleText(m.preview.View()), token)
+}
+
+// TestCursorMoveShowsTheNewlySelectedSessionsExchange pins the syncPreview()
+// calls on BOTH cursor-move paths (update.go's Up and Down cases).
+//
+// The metadata block above the exchange is rendered live from m.selected() on
+// every frame, but the exchange itself comes from m.preview, which only changes
+// when something calls syncPreview(). Without the refill, j leaves the pane
+// showing the new session's Status/Version/TTY/Tokens/Cost directly above the
+// PREVIOUS session's words — a pane that describes two different sessions at
+// once — until the next poll happens to fix it, up to pollInterval later.
+//
+// Asserting the new session's marker is present is only half of it: the pane
+// would also "contain" it if it rendered every session's text. The old
+// session's marker must be GONE.
+func TestCursorMoveShowsTheNewlySelectedSessionsExchange(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        tea.KeyMsg
+		start, end int
+	}{
+		{"down", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, 0, 1},
+		{"up", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, 2, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := modelWithOverflowingPreview(t, 3)
+			m.cursor = c.start
+			m.syncPreview() // the cursor was moved behind Update's back
+			if !previewShows(m, previewHumanMarker(c.start)) {
+				t.Fatalf("fixture: preview does not show session %d's exchange to begin with:\n%s",
+					c.start, visibleText(m.preview.View()))
+			}
+
+			next, _ := m.Update(c.key)
+			m = next.(Model)
+
+			if m.cursor != c.end {
+				t.Fatalf("cursor = %d, want %d — the selection did not actually change", m.cursor, c.end)
+			}
+			if !previewShows(m, previewHumanMarker(c.end)) {
+				t.Errorf("after moving to session %d the preview does not show its exchange:\n%s",
+					c.end, visibleText(m.preview.View()))
+			}
+			if previewShows(m, previewHumanMarker(c.start)) {
+				t.Errorf("after moving off session %d the preview still shows its exchange — "+
+					"the pane's metadata now describes session %d while its words belong to session %d:\n%s",
+					c.start, c.end, c.start, visibleText(m.preview.View()))
+			}
+		})
+	}
 }
 
 func TestUpdateSizesAndFillsTheViewport(t *testing.T) {
@@ -531,6 +611,28 @@ func TestTabTogglesFocus(t *testing.T) {
 	}
 }
 
+// scrolledPreview presses j n times with the PREVIEW focused, restores whatever
+// focus the caller had, and fails if the viewport did not actually move.
+//
+// A test that needs "the viewport is somewhere other than the top" has to get
+// there through the real key path, and has to verify it got there: an offset of
+// 0 silently turns every "did not scroll" assertion below into one that cannot
+// fail, since LineUp clamps at 0.
+func scrolledPreview(t *testing.T, m Model, n int) Model {
+	t.Helper()
+	focus := m.focus
+	m.focus = focusPreview
+	for i := 0; i < n; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = next.(Model)
+	}
+	m.focus = focus
+	if m.preview.YOffset == 0 {
+		t.Fatalf("fixture must be scrolled away from the top after %d presses of j; YOffset is still 0", n)
+	}
+	return m
+}
+
 func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 	// Each case asserts BOTH halves: the focused pane moved AND the other did
 	// not. Asserting only the first half passes for a `j` that moves neither.
@@ -578,11 +680,19 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 		}
 	})
 
-	t.Run("list focused: cursor moves (up), viewport does not scroll", func(t *testing.T) {
+	// The k analog of the FIRST subtest, and it inherits that subtest's blind
+	// spot rather than pretending otherwise: a real selection change calls
+	// GotoTop(), so the viewport lands at 0 whatever a stray LineUp did on the
+	// way. What this can still pin is that the reset happens at all, which it
+	// does from a NONZERO starting offset — asserting "unchanged" from an
+	// offset of 0, as this subtest used to, is a post-state that already held
+	// and cannot fail for any reason. The stray-LineUp mutant is caught by the
+	// boundary subtest below.
+	t.Run("list focused: cursor moves (up), and the viewport is reset", func(t *testing.T) {
 		m := modelWithOverflowingPreview(t, 3)
-		m.focus = focusList
 		m.cursor = 1 // nonzero, so k has somewhere to move to
-		startOffset := m.preview.YOffset
+		m = scrolledPreview(t, m, 3)
+		m.focus = focusList
 
 		next, _ := m.Update(up)
 		m = next.(Model)
@@ -590,16 +700,22 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 		if m.cursor != 0 {
 			t.Errorf("cursor = %d, want 0", m.cursor)
 		}
-		if m.preview.YOffset != startOffset {
-			t.Errorf("viewport scrolled to %d while the list had focus", m.preview.YOffset)
+		if m.preview.YOffset != 0 {
+			t.Errorf("YOffset = %d after k changed the selection, want 0", m.preview.YOffset)
 		}
 	})
 
-	// Up-direction analog of the boundary subtest above.
+	// Up-direction analog of the boundary subtest above — and the direction
+	// that needs more care than a paste. LineDown can move a viewport off
+	// offset 0, so the down version catches a stray scroll starting from a
+	// fresh fixture; LineUp CLAMPS at 0, so the same fixture makes the
+	// assertion unfalsifiable. Only a nonzero starting offset gives a stray
+	// LineUp somewhere to be seen.
 	t.Run("list focused at the boundary (up): viewport still does not scroll", func(t *testing.T) {
 		m := modelWithOverflowingPreview(t, 3)
-		m.focus = focusList
 		m.cursor = 0 // already at the top; k must not move it
+		m = scrolledPreview(t, m, 3)
+		m.focus = focusList
 		startOffset := m.preview.YOffset
 
 		next, _ := m.Update(up)
@@ -609,7 +725,8 @@ func TestJKRouteToTheFocusedPaneOnly(t *testing.T) {
 			t.Fatalf("cursor = %d, want unchanged at the boundary 0 — fixture must actually be blocked", m.cursor)
 		}
 		if m.preview.YOffset != startOffset {
-			t.Errorf("viewport scrolled to %d while the list had focus (blocked cursor)", m.preview.YOffset)
+			t.Errorf("viewport scrolled from %d to %d while the list had focus (blocked cursor)",
+				startOffset, m.preview.YOffset)
 		}
 	})
 

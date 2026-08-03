@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -365,16 +366,26 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 }
 
 // widthSweepModel builds a model at the given terminal width with an
-// overflowing preview exchange and otherwise minimal metadata — no
-// over-wide Version/CWD/TTY field. That isolates the preview title as the
-// only thing that can push the pane's content past its declared height, for
-// TestPreviewPaneBorderSurvivesEveryWidth below.
+// overflowing preview exchange and a realistic metadata block.
+//
+// The Version and TTY are not decoration. "Version: 2.1.220" is 16 display
+// columns, wider than the preview pane's interior at every width in [40, 48),
+// and this fixture deliberately omitted both fields for most of the branch —
+// which is exactly why nothing caught the metadata block wrapping and taking
+// the pane's bottom border with it there. A fixture that omits the widest
+// field a real session carries documents its own blind spot; this one carries
+// it.
 func widthSweepModel(width, height int) Model {
 	m := New()
 	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	m = next.(Model)
 	next, _ = m.Update(sessionsMsg{views: []session.View{{
-		Session:       session.Session{SessionID: "s0"},
+		Session: session.Session{
+			SessionID: "s0",
+			Status:    "waiting",
+			Version:   "2.1.220",
+		},
+		TTY:           "ttys017",
 		HasPreview:    true,
 		LastHuman:     strings.Repeat("word ", 400),
 		LastAssistant: strings.Repeat("word ", 400),
@@ -382,32 +393,253 @@ func widthSweepModel(width, height int) Model {
 	return next.(Model)
 }
 
-// TestPreviewPaneBorderSurvivesEveryWidth is the regression net for
-// Important #1: the preview title (Status/Version/… come after it,
-// unaffected) grows by up to 6 display columns for the focus marker and page
-// indicator, and lipgloss word-wraps a title wider than its pane rather than
-// clipping it — which pushes the metadata block past previewMetadataLines
-// and MaxHeight then clips the pane's own bottom-right corner off the frame.
-// Reddens at widths 40-42 with focus=focusPreview on the pre-fix title code
-// (a bare "Preview ▸ N/M" with no width budget), passes after the fix.
+// scrollPreviewToEnd drives j through Update, with the preview temporarily
+// focused, until the viewport stops moving — calling visit at every offset it
+// passes through, INCLUDING the starting one. Focus is restored afterwards so a
+// caller sweeping focus states can still scroll.
 //
-// Deliberately isolated to a MINIMAL fixture (no over-wide Version/CWD
-// field): busyFrameModel's realistic `Version: "2.1.220"` independently
-// wraps the SAME pane at these widths — verified against 1e62d73, before
-// Task 2 touched anything, with EITHER focus state — which is a separate,
-// pre-existing defect the review scoped outside this task ("deserves its own
-// item"). Folding that fixture into this assertion would make the test
-// permanently red for a reason unrelated to what Task 2 changed, and would
-// stop it from ever isolating a real regression here again.
-func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
+// Stepping one line at a time is the point: the defect this covers (a title
+// that fits at "9/42" and not at "10/42") appears at one specific offset and is
+// invisible to a test that only samples the first and last.
+func scrollPreviewToEnd(t *testing.T, m Model, visit func(m Model)) Model {
+	t.Helper()
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	for i := 0; ; i++ {
+		visit(m)
+		if i > 10000 {
+			t.Fatal("viewport never stopped scrolling")
+		}
+		before := m.preview.YOffset
+		focus := m.focus
+		m.focus = focusPreview
+		next, _ := m.Update(down)
+		m = next.(Model)
+		m.focus = focus
+		if m.preview.YOffset == before {
+			return m
+		}
+	}
+}
+
+// pageIndicatorRE matches the "N/M" page indicator anywhere in a title.
+var pageIndicatorRE = regexp.MustCompile(`\d+/\d+`)
+
+// TestPreviewTitleKeepsBothAffordancesAtEveryWidth pins the spec's two title
+// requirements — "the focus indicator must not depend on colour alone" and
+// "overflow must be visible" — across the whole supported width band and at
+// every scroll position, in both directions (present when it should be, absent
+// when it should not).
+//
+// The old code appended each piece only if the WHOLE title still fit, which
+// failed at both ends of that band: at widths 40-42 "Preview ▸" alone consumed
+// the 12-column interior and the indicator never appeared at all, and at widths
+// 43-45 "Preview ▸ 9/42" fit while "Preview ▸ 10/42" did not — so the indicator
+// showed for nine pages and then VANISHED, which reads as "there is no more
+// content" at the exact moment there still is.
+//
+// TestPreviewTitleShowsFocus and TestPreviewTitleShowsOverflowOnlyWhenItOverflows
+// cover the same two affordances but only ever at width 118, where everything
+// fits and no degradation happens.
+func TestPreviewTitleKeepsBothAffordancesAtEveryWidth(t *testing.T) {
 	for _, focus := range []focusArea{focusList, focusPreview} {
 		for w := minTermWidth; w <= 80; w++ {
 			m := widthSweepModel(w, 20)
 			m.focus = focus
-			frame := m.View()
-			if got := strings.Count(frame, "╯"); got != 2 {
-				t.Fatalf("width %d focus %v: frame has %d bottom-right pane corners (╯), want 2 — a pane's bottom border is missing:\n%s",
-					w, focus, got, frame)
+			_, previewW := paneWidths(w)
+			innerW := paneInnerWidth(previewW)
+
+			if m.preview.TotalLineCount() <= m.preview.Height {
+				t.Fatalf("width %d: fixture does not overflow (%d lines in %d rows) — there is no indicator to assert on",
+					w, m.preview.TotalLineCount(), m.preview.Height)
+			}
+
+			shape := ""
+			scrollPreviewToEnd(t, m, func(m Model) {
+				title := titleOf(m)
+				where := fmt.Sprintf("width %d focus %v offset %d", w, focus, m.preview.YOffset)
+
+				if !pageIndicatorRE.MatchString(title) {
+					t.Fatalf("%s: title %q has no page indicator, but the exchange overflows (%d lines in %d rows)",
+						where, title, m.preview.TotalLineCount(), m.preview.Height)
+				}
+				if got := strings.Contains(title, "▸"); got != (focus == focusPreview) {
+					t.Fatalf("%s: title %q carries the focus marker = %v, want %v",
+						where, title, got, focus == focusPreview)
+				}
+				if got := lipgloss.Width(title); got > innerW {
+					t.Fatalf("%s: title %q is %d display columns, want <= %d — a wider title wraps onto a second line",
+						where, title, got, innerW)
+				}
+				// The whole block must stay exactly previewMetadataLines rows,
+				// which requires the title to be exactly one of them.
+				block := m.renderPreviewMetadata(m.selected(), innerW)
+				if got := strings.Count(block, "\n") + 1; got != previewMetadataLines {
+					t.Fatalf("%s: metadata block is %d lines, want previewMetadataLines = %d:\n%s",
+						where, got, previewMetadataLines, visibleText(block))
+				}
+				// STABILITY, and this is the assertion that pins "decide what
+				// fits against the WIDEST rendering this content can produce".
+				// With the page number normalised out, the title's SHAPE —
+				// which pieces are present and in what order — must be
+				// identical at every offset. A fit decision made against the
+				// current page instead reddens here the moment the page number
+				// gains a digit and pushes the title one column over, which is
+				// what dropped the indicator from page 10 on at widths 43-45.
+				// (The rendered width itself does grow by that digit; nothing
+				// is laid out against the title's trailing edge, and the sweep
+				// above already bounds it by innerW at every page.)
+				if got := pageIndicatorRE.ReplaceAllString(title, "N/M"); shape == "" {
+					shape = got
+				} else if got != shape {
+					t.Fatalf("%s: title reads %q, but it was shaped %q at the top — "+
+						"the title must not gain or lose pieces as the reader scrolls",
+						where, got, shape)
+				}
+			})
+		}
+	}
+}
+
+// TestPreviewTitleOmitsTheIndicatorAtEveryWidthWhenItFits is the reject half of
+// the sweep above: no overflow, no indicator — at every width, not just the one
+// wide width TestPreviewTitleShowsOverflowOnlyWhenItOverflows uses. Without it,
+// "always show an indicator" would satisfy the accept half completely.
+func TestPreviewTitleOmitsTheIndicatorAtEveryWidthWhenItFits(t *testing.T) {
+	for _, focus := range []focusArea{focusList, focusPreview} {
+		for w := minTermWidth; w <= 80; w++ {
+			m := New()
+			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 20})
+			m = next.(Model)
+			next, _ = m.Update(sessionsMsg{views: []session.View{{
+				Session:    session.Session{SessionID: "s0", Status: "idle", Version: "2.1.220"},
+				TTY:        "ttys017",
+				HasPreview: true,
+				LastHuman:  "hi",
+			}}})
+			m = next.(Model)
+			m.focus = focus
+			if m.preview.TotalLineCount() > m.preview.Height {
+				t.Fatalf("width %d: fixture must FIT (%d lines in %d rows)",
+					w, m.preview.TotalLineCount(), m.preview.Height)
+			}
+
+			title := titleOf(m)
+			if pageIndicatorRE.MatchString(title) {
+				t.Errorf("width %d focus %v: title %q shows a page indicator for an exchange that fits",
+					w, focus, title)
+			}
+			if got := strings.Contains(title, "▸"); got != (focus == focusPreview) {
+				t.Errorf("width %d focus %v: title %q carries the focus marker = %v, want %v",
+					w, focus, title, got, focus == focusPreview)
+			}
+		}
+	}
+}
+
+// TestDoubleWidthExchangeIsFullyReachableAndHonestlyIndicated is the end-to-end
+// half of the wrapToWidth display-width fix (layout.go).
+//
+// With a rune-budgeted wrap, a CJK exchange produced logical lines twice the
+// pane's width; lipgloss re-wrapped each onto two screen rows and
+// viewport.View()'s MaxHeight clipped the surplus, while TotalLineCount — which
+// counts LOGICAL lines — reported the content as fitting. Two distinct
+// failures, both reproduced before this fix at 100x30: with 100 repeats only 6
+// of 10 lines rendered, no indicator appeared and j was a silent no-op; with
+// 300 repeats the title reached "2/2" — "you are at the end" — at maximum
+// scroll while the end of the message had never been on screen.
+//
+// So this asserts BOTH: the end is reachable, and the title never claims
+// completeness while it is not.
+func TestDoubleWidthExchangeIsFullyReachableAndHonestlyIndicated(t *testing.T) {
+	const endMarker = "ENDMARKER"
+	for _, repeats := range []int{100, 300} {
+		m := New()
+		next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		m = next.(Model)
+		next, _ = m.Update(sessionsMsg{views: []session.View{{
+			Session:       session.Session{SessionID: "s0"},
+			HasPreview:    true,
+			LastHuman:     "hi",
+			LastAssistant: strings.Repeat("完了", repeats) + endMarker,
+		}}})
+		m = next.(Model)
+		m.focus = focusPreview
+
+		// "M/M" — the indicator's value at the last page. "" when the exchange
+		// fits, in which case the title claims completeness by saying nothing.
+		lastPage := widestScrollIndicator(m.preview.TotalLineCount(), m.preview.Height)
+
+		m = scrollPreviewToEnd(t, m, func(m Model) {
+			title := titleOf(m)
+			complete := lastPage == "" || strings.Contains(title, lastPage)
+			if complete && !strings.Contains(visibleText(m.preview.View()), endMarker) {
+				t.Fatalf("repeats %d, offset %d: title %q reports the exchange as complete, "+
+					"but its last characters (%q) are not on screen:\n%s",
+					repeats, m.preview.YOffset, title, endMarker, visibleText(m.preview.View()))
+			}
+		})
+
+		if body := visibleText(m.preview.View()); !strings.Contains(body, endMarker) {
+			t.Errorf("repeats %d: scrolled to the bottom (offset %d of %d lines in %d rows) and the end of the message (%q) is still unreachable:\n%s",
+				repeats, m.preview.YOffset, m.preview.TotalLineCount(), m.preview.Height, endMarker, body)
+		}
+	}
+}
+
+// TestPreviewPaneBorderSurvivesEveryWidth is the regression net for the
+// preview pane's bottom border, which nothing above the pane can afford to
+// push off the frame.
+//
+// lipgloss word-WRAPS any line wider than the pane rather than clipping it, so
+// one over-wide line in the metadata block pushes the block past
+// previewMetadataLines and the pane's MaxHeight then clips its own bottom-right
+// corner out of the frame. Two separate lines could do it, and this test now
+// covers both:
+//
+//   - THE TITLE, which grows by up to 6 columns for the focus marker and the
+//     page indicator. Reddens at widths 40-42 with focus=focusPreview against a
+//     title with no width budget at all.
+//
+//   - THE METADATA FIELDS, of which "Version: 2.1.220" is the widest a real
+//     session produces at 16 columns — wider than the pane's interior at every
+//     width in [40, 48). This fixture used to omit Version deliberately, on the
+//     grounds that it was a separate pre-existing defect; measurement says
+//     otherwise. With a short exchange, base 46896e1 renders 2 pane corners at
+//     every width in [40, 55] while e367bce renders 1 at [40, 47]: padding the
+//     viewport to its full Height regardless of content removed the vertical
+//     slack that used to absorb the wrapped line, turning an intermittent
+//     pre-existing wrap into an always-on missing border across the supported
+//     band. Both halves are fixed and both are swept here.
+func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
+	// Both exchange lengths: the viewport pads to its full Height either way,
+	// so the metadata block has the same room in both — but the SHORT exchange
+	// is the fixture the regression was measured with, and the overflowing one
+	// is the only one that renders a page indicator in the title at all.
+	fixtures := map[string]func(w, h int) Model{
+		"overflowing exchange": widthSweepModel,
+		"short exchange": func(w, h int) Model {
+			m := New()
+			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+			m = next.(Model)
+			next, _ = m.Update(sessionsMsg{views: []session.View{{
+				Session:    session.Session{SessionID: "s0", Status: "waiting", Version: "2.1.220"},
+				TTY:        "ttys017",
+				HasPreview: true,
+				LastHuman:  "hi",
+			}}})
+			return next.(Model)
+		},
+	}
+	for name, build := range fixtures {
+		for _, focus := range []focusArea{focusList, focusPreview} {
+			for w := minTermWidth; w <= 80; w++ {
+				m := build(w, 20)
+				m.focus = focus
+				frame := m.View()
+				if got := strings.Count(frame, "╯"); got != 2 {
+					t.Fatalf("%s, width %d focus %v: frame has %d bottom-right pane corners (╯), want 2 — a pane's bottom border is missing:\n%s",
+						name, w, focus, got, frame)
+				}
 			}
 		}
 	}

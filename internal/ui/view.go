@@ -114,6 +114,71 @@ func previewField(label, value string) string {
 	return labelStyle.Render(label+":") + " " + value
 }
 
+// previewTitle composes the preview pane's title line out of three pieces —
+// the word "Preview", the focus marker, and the page indicator — degrading to
+// whatever fits in innerW display columns.
+//
+// indicator is the page indicator for the CURRENT offset ("3/12") and widest is
+// the widest one this content can ever produce ("12/12"); both are "" when the
+// exchange fits. Every candidate is RENDERED with indicator but MEASURED with
+// widest, so which pieces survive cannot depend on where the reader has
+// scrolled to — if the title fits on page 1 it fits on every page. Deciding per
+// page is what made the indicator show through page 9 and then vanish from page
+// 10 at widths 43-45, which reads as "there is no more content" at the exact
+// moment there still is. (The number itself still gains a column when it gains
+// a digit; the title is left-aligned and nothing is laid out against its
+// trailing edge.)
+//
+// The literal word "Preview" is dropped BEFORE either affordance, because the
+// pane is already identified by its border and its position while the marker
+// says what j/k will do and the indicator says there is more to read. That
+// ordering is what keeps both affordances alive at minTermWidth, where the
+// pane's interior is 12 columns: "Preview ▸ 12/12" is 15 and does not fit,
+// "▸ 12/12" is 7 and fits comfortably.
+//
+// The marker is text, not colour: the focused state has to stay legible on a
+// terminal whose colour rendering we cannot verify.
+//
+// The result is always exactly ONE line, and that is load-bearing: lipgloss
+// word-WRAPS a Style.Width() block that overflows rather than clipping it, so a
+// title one column too wide becomes two lines, previewMetadataLines goes stale,
+// the viewport is mis-sized against it, and the pane's own MaxHeight clips its
+// bottom border off the frame.
+//
+// Last resort, reachable only with a page count wide enough to fill the pane on
+// its own (four digits at minTermWidth): the marker alone. Nothing shorter than
+// that carries any information, so below it the title goes empty rather than
+// printing a fragment of a page number.
+func previewTitle(focused bool, indicator, widest string, innerW int) string {
+	marker := ""
+	if focused {
+		marker = "▸"
+	}
+	compose := func(word, ind string) string {
+		var parts []string
+		for _, p := range []string{word, marker, ind} {
+			if p != "" {
+				parts = append(parts, p)
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+	// Most informative first.
+	for _, c := range []struct{ show, measure string }{
+		{compose("Preview", indicator), compose("Preview", widest)},
+		{compose("", indicator), compose("", widest)},
+		{compose("", ""), compose("", "")},
+	} {
+		if c.show == "" {
+			continue // this rendering carries nothing; try the next one
+		}
+		if lipgloss.Width(c.measure) <= innerW {
+			return c.show
+		}
+	}
+	return ""
+}
+
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
 		// Not sized yet — bubbletea sends a WindowSizeMsg before the first
@@ -223,44 +288,48 @@ const previewMetadataLines = 9
 // reader wants WHILE reading a long message. Scrolled away, the reader loses
 // track of which session they are even looking at.
 //
-// innerW is the pane's content width in display columns. The title MUST fit
-// inside it: lipgloss word-wraps a Style.Width() block that overflows rather
-// than clipping it, so a too-wide title becomes two lines, previewMetadataLines
+// innerW is the pane's content width in display columns. EVERY line below must
+// fit inside it: lipgloss word-wraps a Style.Width() block that overflows
+// rather than clipping it, so a too-wide line becomes two, previewMetadataLines
 // silently goes stale, and the pane's own MaxHeight then clips its bottom
-// border off the screen (regression at widths 40-42 with a 2-digit page count,
-// or wider with 3 digits — see TestPreviewPaneBorderSurvivesEveryWidth's ╯
+// border off the screen (see TestPreviewPaneBorderSurvivesEveryWidth's ╯
 // count).
+//
+// The title degrades token by token (previewTitle). The metadata fields cannot
+// — a value is one token — so they are hard-clipped instead, with an ellipsis
+// marking the cut. A realistic "Version: 2.1.220" is 16 columns and wrapped the
+// pane at every width in [40, 48): harmless-looking, but it costs the pane its
+// entire bottom border, and the scrolling preview made it permanent by padding
+// the viewport to its full Height regardless of content, removing the vertical
+// slack that used to absorb the extra line.
 func (m Model) renderPreviewMetadata(v *session.View, innerW int) string {
+	// fit clamps one line to the pane's interior. innerW <= 0 means there is no
+	// interior at all, so nothing can be drawn in it.
+	fit := func(s string) string {
+		if innerW <= 0 {
+			return ""
+		}
+		return ansi.Truncate(s, innerW, "…")
+	}
+
 	var b strings.Builder
-	title := "Preview"
-	// Degrade in priority order rather than truncate mid-token. Focus is the
-	// more important affordance at a narrow width — it tells the user what
-	// j/k will do — so try the marker first, then the page indicator, and
-	// drop either (or both) the moment it would not fit. The title must never
-	// wrap onto a second line.
-	if m.focus == focusPreview {
-		// A text marker, not colour alone: the focused state must stay legible
-		// on a terminal whose colour rendering we cannot verify.
-		if candidate := title + " ▸"; lipgloss.Width(candidate) <= innerW {
-			title = candidate
-		}
-	}
-	if ind := scrollIndicator(m.preview.TotalLineCount(), m.preview.Height, m.preview.YOffset); ind != "" {
-		if candidate := title + " " + ind; lipgloss.Width(candidate) <= innerW {
-			title = candidate
-		}
-	}
-	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n" + previewField("Status", v.Status))
-	b.WriteString("\n" + previewField("Version", v.Version))
+	total, height, offset := m.preview.TotalLineCount(), m.preview.Height, m.preview.YOffset
+	b.WriteString(titleStyle.Render(previewTitle(
+		m.focus == focusPreview,
+		scrollIndicator(total, height, offset),
+		widestScrollIndicator(total, height),
+		innerW,
+	)))
+	b.WriteString("\n" + fit(previewField("Status", v.Status)))
+	b.WriteString("\n" + fit(previewField("Version", v.Version)))
 	tty := v.TTY
 	if tty == "" {
 		tty = "-"
 	}
-	b.WriteString("\n" + previewField("TTY", tty))
-	b.WriteString("\n\n" + labelStyle.Render("main thread"))
-	b.WriteString("\n" + previewField("Tokens", fmt.Sprintf("%d", v.Tokens)))
-	b.WriteString("\n" + previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)))
+	b.WriteString("\n" + fit(previewField("TTY", tty)))
+	b.WriteString("\n\n" + fit(labelStyle.Render("main thread")))
+	b.WriteString("\n" + fit(previewField("Tokens", fmt.Sprintf("%d", v.Tokens))))
+	b.WriteString("\n" + fit(previewField("Cost", fmt.Sprintf("$%.2f", v.Cost))))
 	b.WriteString("\n")
 	return b.String()
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Geometry constants.
@@ -113,22 +115,40 @@ func elideMiddle(s string, w int) string {
 	return string(r[:head]) + "…" + string(r[len(r)-tail:])
 }
 
-// wrapToWidth hard-wraps s into lines of at most w runes each, so long
-// transcript text does not overflow the preview pane's border. It is
-// rune-aware so multibyte UTF-8 text is never split mid-rune. w<=0 is treated
-// as "no limit" (the caller has nothing sane to wrap to).
+// wrapToWidth hard-wraps s into lines of at most w DISPLAY COLUMNS each, so
+// long transcript text does not overflow the preview pane's border. w<=0 is
+// treated as "no limit" (the caller has nothing sane to wrap to).
+//
+// Columns, not runes, and the difference is not cosmetic. This wraps the
+// preview's exchange, which is then handed to a viewport whose Width and whose
+// lipgloss rendering both budget in display columns. A rune budget makes a
+// CJK/emoji line up to twice the pane's width; lipgloss re-wraps each such
+// logical line onto two screen rows, and viewport.View()'s MaxHeight then
+// hard-clips the surplus rows off the bottom. Because TotalLineCount counts
+// LOGICAL lines, the viewport believes the content fits: scrollIndicator sees
+// total <= height and prints nothing, maxYOffset is 0, and j is a silent no-op
+// — the end of the message is unreachable AND advertised as complete, which is
+// the exact defect the scrolling preview exists to remove. (view.go's formatRow
+// documents the same rune-vs-column hazard for list rows and fixes it there
+// with ansi.Truncate.)
+//
+// ansi.Hardwrap is the GRAPHEME-based variant, deliberately, not HardwrapWc:
+// lipgloss v1.1.0 measures with ansi.StringWidth, which is grapheme-based, and
+// viewport.View() sizes its content with lipgloss Style.Width/MaxWidth. Using
+// the wide-character/rune variant would budget by a different measure than the
+// code that consumes the result, and would break grapheme clusters (a ZWJ emoji
+// sequence) across lines. ansi is not lipgloss, so this keeps layout.go free of
+// the lipgloss import.
+//
+// One inherent limit: a single grapheme wider than w cannot be made to fit, so
+// its line is w+1 columns. Unreachable in this program — the preview pane's
+// interior is at least 12 columns at minTermWidth — but worth knowing before
+// this is reused somewhere narrower.
 func wrapToWidth(s string, w int) string {
 	if w <= 0 {
 		return s
 	}
-	r := []rune(s)
-	var b strings.Builder
-	for len(r) > w {
-		b.WriteString(string(r[:w]) + "\n")
-		r = r[w:]
-	}
-	b.WriteString(string(r))
-	return b.String()
+	return ansi.Hardwrap(s, w, true)
 }
 
 // rowWidths splits a session row's text budget between the name, directory,
@@ -179,6 +199,35 @@ func compactAge(t, now time.Time) string {
 	}
 }
 
+// scrollPages is how many page-sized chunks the content occupies, or 0 when it
+// fits and there is nothing to indicate.
+func scrollPages(total, height int) int {
+	if height <= 0 || total <= height {
+		return 0
+	}
+	return (total + height - 1) / height
+}
+
+// widestScrollIndicator is the WIDEST string scrollIndicator can return for
+// this content, whatever the offset: the same "N/M" with N as wide as M.
+//
+// The caller decides whether the page indicator fits in the pane title, and
+// that decision must not depend on which page the reader happens to be on. A
+// per-page decision made the indicator fit through "9/12" and stop fitting at
+// "10/12", so at widths 43-45 it showed for nine pages and then vanished —
+// and an indicator that disappears as you scroll reads as "there is no more
+// content", inverting the very thing it is there to say.
+//
+// The current page is always <= pages (scrollIndicator's own at-bottom branch
+// caps it there), so this really is the widest form.
+func widestScrollIndicator(total, height int) string {
+	pages := scrollPages(total, height)
+	if pages == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d", pages, pages)
+}
+
 // scrollIndicator renders "2/3" when content overflows its pane, and "" when it
 // fits.
 //
@@ -186,10 +235,10 @@ func compactAge(t, now time.Time) string {
 // defect this whole feature exists to remove, merely relocated from the pane
 // body to the pane title.
 func scrollIndicator(total, height, offset int) string {
-	if height <= 0 || total <= height {
+	pages := scrollPages(total, height)
+	if pages == 0 {
 		return ""
 	}
-	pages := (total + height - 1) / height
 	page := offset/height + 1
 	// page reports which page-sized CHUNK the top visible line falls in. The
 	// last screenful straddles two chunks whenever height does not evenly
