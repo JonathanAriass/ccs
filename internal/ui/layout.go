@@ -162,9 +162,26 @@ func truncateToWidth(s string, w int) string {
 //
 // The tail is what distinguishes two sessions in the same repo (a worktree
 // name), so truncating from the right would make them indistinguishable.
+//
+// A nonpositive w means there is no room for ANY of the string, matching
+// truncateToWidth. It used to mean the opposite here — the whole string came
+// back unclipped, precisely when the caller had said there was no space — and
+// two sibling helpers documented identically must not disagree about that.
+// Unreachable today: sweeping every terminal size the program renders a frame in
+// bottoms w out at 2, and below minTermWidth the "Terminal too small" notice
+// replaces the row entirely. So this is contract hygiene, not a layout
+// guarantee — if dirW can ever legitimately reach 0, the fix belongs in
+// rowWidths (give dir a floor, or drop the column and reallocate its budget),
+// not in the elision helper.
 func elideMiddle(s string, w int) string {
+	// Its own statement, deliberately, rather than folded into the w <= 3 branch
+	// below: strings.Repeat PANICS on a negative count, so letting that branch
+	// absorb this case would be correct for w == 0 and a panic for w < 0.
+	if w <= 0 {
+		return ""
+	}
 	sw := ansi.StringWidth(s)
-	if sw <= w || w <= 0 {
+	if sw <= w {
 		return s
 	}
 	if w <= 3 {

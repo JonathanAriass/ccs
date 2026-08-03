@@ -150,6 +150,32 @@ func TestElideMiddleTinyWidth(t *testing.T) {
 	}
 }
 
+// TestWidthHelpersAgreeOnNonPositiveWidth pins BOTH width helpers at w <= 0.
+//
+// The defect is a disagreement between two functions documented identically as
+// "clip to w DISPLAY COLUMNS", so a test that pinned only one of them could not
+// express it — and pinning both means a future edit that "harmonises" them in
+// the wrong direction reddens too.
+//
+// The negative cases are load-bearing and are why this is not a w == 0
+// assertion alone. The tempting one-character fix here is to delete the w <= 0
+// arm and let the existing w <= 3 branch absorb it; that is correct at w == 0,
+// because strings.Repeat("…", 0) is "", and PANICS at w < 0, because
+// strings.Repeat panics on a negative count. A w == 0-only assertion is GREEN
+// under that rewrite, so it would miss the one edit anybody is actually likely
+// to make.
+func TestWidthHelpersAgreeOnNonPositiveWidth(t *testing.T) {
+	const s = "~/Desktop/okt-api/.claude/worktrees/OKT-18841-detracciones-mx"
+	for _, w := range []int{0, -1, -7} {
+		if got := truncateToWidth(s, w); got != "" {
+			t.Errorf("truncateToWidth(%q,%d) = %q, want %q", s, w, got, "")
+		}
+		if got := elideMiddle(s, w); got != "" {
+			t.Errorf("elideMiddle(%q,%d) = %q, want %q — a nonpositive width means there is no room for ANY of the path, not room for all of it", s, w, got, "")
+		}
+	}
+}
+
 func TestRowWidthsPartitionsExactly(t *testing.T) {
 	for _, total := range []int{0, 1, 7, 30, 61, 100} {
 		name, dir, msg := rowWidths(total)
