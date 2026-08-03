@@ -65,6 +65,21 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(pollCmd(), tickCmd())
 }
 
+// previewVisible reports whether the preview pane is rendered at all at the
+// model's current terminal height.
+//
+// This is the SINGLE shared source View and handleKey both consult — View to
+// decide whether to draw a second pane at all, handleKey to decide whether
+// j/k move the list or scroll the preview and whether Tab has anything to
+// switch to. Two independently-computed conditions could drift out of
+// agreement (e.g. a resize that leaves m.focus pointed at focusPreview while
+// the pane it names is no longer on screen); consulting one predicate from
+// both places makes that impossible rather than merely unlikely. See
+// previewFits for the threshold itself.
+func (m Model) previewVisible() bool {
+	return previewFits(m.height)
+}
+
 // selected returns the highlighted session, or nil when the list is empty.
 func (m *Model) selected() *session.View {
 	if m.cursor < 0 || m.cursor >= len(m.views) {

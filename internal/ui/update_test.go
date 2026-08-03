@@ -991,3 +991,71 @@ func TestFocusIgnoresStalePolledTTYForAnUnknownPID(t *testing.T) {
 		t.Errorf("status = %q, want %q (stale v.TTY must not have been trusted)", m.status, want)
 	}
 }
+
+// --- Small-height layout: the preview pane disappears below previewFits'
+// threshold, and focus must not be left pointing at a pane that isn't drawn.
+
+// TestJDoesNotFreezeAfterShrinkingBelowThePreviewThreshold is the regression
+// test for the dead-key hazard: focus the preview pane at a tall terminal,
+// shrink below previewFits' threshold (where View stops drawing a preview
+// pane at all), and press j. Before the previewVisible() guard on Up/Down,
+// m.focus stayed focusPreview across the resize (nothing resets it — see
+// previewVisible's doc comment for why that is deliberate) and j called
+// m.preview.LineUp/LineDown on a viewport nothing on screen shows — a key
+// that visibly does nothing, which reads as a frozen app.
+//
+// Starts from cursor 0 with 3 sessions specifically so the list CAN move:
+// asserting "the cursor moved" from a position already at a boundary would
+// hold even with the dead-key bug present, proving nothing.
+func TestJDoesNotFreezeAfterShrinkingBelowThePreviewThreshold(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	m.cursor = 0
+	m.focus = focusPreview
+	if !m.previewVisible() {
+		t.Fatal("fixture: preview must be visible at the starting (tall) size")
+	}
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13}) // one below the threshold
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at height 13 — see previewFits")
+	}
+	if m.focus != focusPreview {
+		t.Fatal("fixture: focus must still read focusPreview after the resize — a resize does not touch m.focus")
+	}
+
+	startOffset := m.preview.YOffset
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = next.(Model)
+
+	if m.cursor != 1 {
+		t.Errorf("cursor = %d after j with an invisible preview focused, want 1 — "+
+			"the list must move regardless of m.focus", m.cursor)
+	}
+	if m.preview.YOffset != startOffset {
+		t.Errorf("preview YOffset changed from %d to %d — j scrolled a pane nothing on screen shows",
+			startOffset, m.preview.YOffset)
+	}
+}
+
+// TestTabIsNoOpWhenPreviewNotVisible pins the other half of "focus must not
+// point at a pane that isn't drawn": with no second pane to switch TO, Tab
+// must not toggle m.focus (and must not schedule a command).
+func TestTabIsNoOpWhenPreviewNotVisible(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13})
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at height 13")
+	}
+
+	before := m.focus
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.focus != before {
+		t.Errorf("Tab changed focus from %v to %v with no preview pane on screen", before, m.focus)
+	}
+	if cmd != nil {
+		t.Error("Tab scheduled a command with no preview pane on screen")
+	}
+}

@@ -184,6 +184,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case key.Matches(msg, m.keys.Cycle):
+		if !m.previewVisible() {
+			// No second pane to switch to — see previewVisible's doc comment.
+			// Deliberately a no-op rather than, say, forcing m.focus to
+			// focusList: leaving m.focus untouched means a later resize back
+			// to a tall enough terminal restores the SAME pane the user had
+			// focused before it disappeared, rather than always resetting to
+			// the list.
+			return m, nil
+		}
 		if m.focus == focusList {
 			m.focus = focusPreview
 		} else {
@@ -192,7 +201,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Up):
-		if m.focus == focusPreview {
+		if m.focus == focusPreview && m.previewVisible() {
 			m.preview.LineUp(1)
 			return m, nil
 		}
@@ -212,7 +221,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Down):
-		if m.focus == focusPreview {
+		if m.focus == focusPreview && m.previewVisible() {
 			m.preview.LineDown(1)
 			return m, nil
 		}

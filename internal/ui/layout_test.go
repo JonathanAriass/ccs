@@ -230,6 +230,36 @@ func TestPreviewBodyHeight(t *testing.T) {
 	}
 }
 
+// TestPreviewFitsThresholdIsExactlyHeight14 pins previewFits' boundary in
+// BOTH directions, at the pure-function level, independent of any rendering.
+// Pinning only one side (e.g. "13 must not fit") leaves the other free to
+// drift — a mutant that changed ">=" to ">" would still fail 13 but wrongly
+// pass 14 through as well, and this table catches that.
+//
+// The exact numbers: bodyPaneHeight(14) = 12, paneInnerHeight(12) = 10, and
+// previewMetadataLines (9) + 1 = 10 — so 14 lands EXACTLY on the boundary,
+// not comfortably inside it. That is deliberate coverage, not an arbitrary
+// choice of fixture: it is the value view.go's own TestPreviewPaneRendersAtHeight14ButNotHeight13
+// exercises end to end, so this test and that one must agree.
+func TestPreviewFitsThresholdIsExactlyHeight14(t *testing.T) {
+	cases := []struct {
+		termH int
+		want  bool
+	}{
+		{8, false},
+		{10, false},
+		{13, false}, // one below the boundary
+		{14, true},  // the boundary itself
+		{15, true},
+		{30, true},
+	}
+	for _, c := range cases {
+		if got := previewFits(c.termH); got != c.want {
+			t.Errorf("previewFits(%d) = %v, want %v", c.termH, got, c.want)
+		}
+	}
+}
+
 func TestBodyPaneHeightNeverDropsBelowOne(t *testing.T) {
 	// lipgloss Height(0) and negative heights both misrender. View already
 	// clamps; bodyPaneHeight is now the single place that does it.

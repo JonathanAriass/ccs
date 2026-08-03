@@ -82,6 +82,27 @@ func previewBodyHeight(paneInnerH, metadataLines int) int {
 	return h
 }
 
+// previewFits reports whether the preview pane has enough interior room, at
+// terminal height termH, to show at least one row of the actual exchange —
+// not just its pinned metadata block.
+//
+// viewport.View() at Height 0 still emits ONE line (lipgloss treats Height(0)
+// as unset — see previewBodyHeight), so the pane's interior needs room for
+// previewMetadataLines PLUS one more row, or the viewport's single emitted
+// line overruns the pane and MaxHeight clips the pane's own bottom border off
+// the frame — a pane that shows zero lines of the exchange (the entire point
+// of the pane) while ALSO breaking the frame around it. Below that threshold,
+// rendering no preview pane at all is strictly better: see
+// (Model).previewVisible, which both View and handleKey consult so they
+// cannot disagree about whether the pane is on screen.
+//
+// previewMetadataLines is defined in view.go, not here — this stays a pure
+// function of termH so it can be pinned directly (TestPreviewFitsThreshold)
+// without building a styled frame.
+func previewFits(termH int) bool {
+	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
+}
+
 // truncateToWidth clips s to w columns, marking the cut with an ellipsis.
 func truncateToWidth(s string, w int) string {
 	if w <= 0 {

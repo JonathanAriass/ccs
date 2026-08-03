@@ -190,23 +190,48 @@ func (m Model) View() string {
 			fmt.Sprintf("Terminal too small\n(need %d×%d)", minTermWidth, minTermHeight))
 	}
 
-	listW, previewW := paneWidths(m.width)
 	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
 
-	lp, pp := listPane, previewPane
-	if m.focus == focusPreview {
-		// The brighter border follows focus.
-		lp, pp = previewPane, listPane
-	}
-
-	var list string
-	if m.err != nil {
-		list = m.renderListError(listW, paneH, lp)
+	var body string
+	if !m.previewVisible() {
+		// Below previewFits' threshold the preview pane could show its pinned
+		// metadata but ZERO lines of the actual exchange — which is the whole
+		// point of the pane — while its one phantom viewport line (see
+		// previewFits) also breaks the frame's own border. A pane that renders
+		// nothing useful AND corrupts the frame is strictly worse than no pane
+		// at all, so draw the list alone at the full terminal width: it still
+		// does the tool's primary job (see sessions, press Enter to jump), and
+		// the list itself stays fully usable well below this threshold (4 of 6
+		// rows visible at minTermHeight, all 6 by height 10).
+		//
+		// The list is always drawn with the "focused" border here: it is the
+		// only interactive pane on screen, so there is nothing for the border
+		// color to distinguish it from. m.focus itself is left untouched — see
+		// previewVisible's doc comment for why handleKey, not this branch, is
+		// what keeps j/k working regardless of what m.focus says.
+		if m.err != nil {
+			body = m.renderListError(m.width, paneH, listPane)
+		} else {
+			body = m.renderList(m.width, paneH, listPane)
+		}
 	} else {
-		list = m.renderList(listW, paneH, lp)
+		listW, previewW := paneWidths(m.width)
+
+		lp, pp := listPane, previewPane
+		if m.focus == focusPreview {
+			// The brighter border follows focus.
+			lp, pp = previewPane, listPane
+		}
+
+		var list string
+		if m.err != nil {
+			list = m.renderListError(listW, paneH, lp)
+		} else {
+			list = m.renderList(listW, paneH, lp)
+		}
+		preview := m.renderPreview(previewW, paneH, pp)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
 	}
-	preview := m.renderPreview(previewW, paneH, pp)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
 
 	// Both footer lines are hard-clipped to the terminal width.
 	//

@@ -875,3 +875,106 @@ func TestViewNotYetSizedRendersEmpty(t *testing.T) {
 		t.Errorf("View() before sizing = %q, want empty", got)
 	}
 }
+
+// --- Small-height layout: below previewFits' threshold, only the list renders ---
+
+// heightSweepModel builds a model with one realistic, overflowing session at
+// the given terminal size. Version, TTY, and nonzero Tokens/Cost are all set
+// deliberately: widthSweepModel's own doc comment documents how an omitted
+// Version specifically hid a real border bug for most of a branch, and the
+// same reasoning applies on the height axis — a fixture that omits fields a
+// live session actually carries proves less than one that doesn't.
+func heightSweepModel(width, height int) Model {
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	m = next.(Model)
+	next, _ = m.Update(sessionsMsg{views: []session.View{{
+		Session: session.Session{
+			SessionID:       "s0",
+			Name:            "session-name",
+			CWD:             "/Users/x/Desktop/project",
+			Status:          "waiting",
+			Version:         "2.1.220",
+			StatusUpdatedAt: 1785322956268,
+		},
+		TTY:           "ttys017",
+		HasPreview:    true,
+		LastHuman:     strings.Repeat("word ", 400),
+		LastAssistant: strings.Repeat("word ", 400),
+		Tokens:        4242,
+		Cost:          12.34,
+	}}})
+	return next.(Model)
+}
+
+// TestFrameStructurallySoundAcrossHeightSweep is the height-axis analog of
+// TestViewNeverExceedsTerminalWidth, and it is the test that would have
+// caught the original missing-bottom-border bug before it shipped: every
+// existing border/height assertion in this file pins terminal height 20
+// only, so nothing exercised heights 8-13 at all.
+//
+// The invariant is chosen to hold in BOTH layout modes this package now has
+// (two-pane above previewFits' threshold, list-only below it): every pane
+// OPENED is a pane CLOSED. Asserting a fixed corner count (the shape of the
+// pre-existing width sweep's own assertion) would need editing the moment
+// list-only mode shipped — and a test that has to change in lockstep with
+// the code it guards is not really pinning anything independent.
+func TestFrameStructurallySoundAcrossHeightSweep(t *testing.T) {
+	for _, w := range []int{minTermWidth, 60, 100} {
+		for h := minTermHeight; h <= 30; h++ {
+			for _, focus := range []focusArea{focusList, focusPreview} {
+				m := heightSweepModel(w, h)
+				m.focus = focus
+				frame := m.View()
+
+				open := strings.Count(frame, "╭")
+				closed := strings.Count(frame, "╯")
+				if open != closed {
+					t.Fatalf("width %d height %d focus %v: %d panes opened (╭) but %d closed (╯) — a pane's bottom border is broken:\n%s",
+						w, h, focus, open, closed, frame)
+				}
+				if open == 0 {
+					t.Fatalf("width %d height %d focus %v: frame has no panes at all — nothing to measure:\n%s",
+						w, h, focus, frame)
+				}
+
+				lines := strings.Split(frame, "\n")
+				if len(lines) > h {
+					t.Fatalf("width %d height %d focus %v: frame is %d lines, want <= %d (the terminal height):\n%s",
+						w, h, focus, len(lines), h, frame)
+				}
+				for i, ln := range lines {
+					if got := lipgloss.Width(ln); got > w {
+						t.Fatalf("width %d height %d focus %v: line %d is %d display columns, want <= %d:\n%q",
+							w, h, focus, i, got, w, visibleText(ln))
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPreviewPaneRendersAtHeight14ButNotHeight13 pins previewFits' threshold
+// end to end through the real View() path, in BOTH directions — the
+// companion to layout_test.go's TestPreviewFitsThresholdIsExactlyHeight14,
+// which pins the same boundary at the pure-function level. Pinning only one
+// side leaves the other free to drift.
+func TestPreviewPaneRendersAtHeight14ButNotHeight13(t *testing.T) {
+	cases := []struct {
+		height    int
+		wantPanes int
+	}{
+		{14, 2}, // the boundary itself: the preview pane IS rendered
+		{13, 1}, // one row shorter: list-only
+	}
+	for _, c := range cases {
+		m := heightSweepModel(100, c.height)
+		frame := m.View()
+		if got := strings.Count(frame, "╭"); got != c.wantPanes {
+			t.Errorf("height %d: %d panes opened (╭), want %d:\n%s", c.height, got, c.wantPanes, visibleText(frame))
+		}
+		if got := strings.Count(frame, "╯"); got != c.wantPanes {
+			t.Errorf("height %d: %d panes closed (╯), want %d:\n%s", c.height, got, c.wantPanes, visibleText(frame))
+		}
+	}
+}
