@@ -938,34 +938,58 @@ func TestViewNotYetSizedRendersEmpty(t *testing.T) {
 
 // --- Small-height layout: below previewFits' threshold, only the list renders ---
 
-// heightSweepModel builds a model with one realistic, overflowing session at
-// the given terminal size. Version, TTY, and nonzero Tokens/Cost are all set
+// liveSessionCount is how many sessions the height sweeps below treat as the
+// normal case.
+//
+// It is not a round number picked for looks: it is what the author actually has
+// running. A one-session fixture is what let the list pane overflow its own
+// bottom border at EVERY height from minTermHeight through 19 without a single
+// test noticing — with one session the list content is two lines and fits
+// anywhere, so the sweep's structural invariant held for a reason that had
+// nothing to do with the layout being sound.
+const liveSessionCount = 15
+
+// heightSweepModel builds a model with n realistic, overflowing sessions at the
+// given terminal size. Version, TTY, and nonzero Tokens/Cost are all set
 // deliberately: widthSweepModel's own doc comment documents how an omitted
 // Version specifically hid a real border bug for most of a branch, and the
 // same reasoning applies on the height axis — a fixture that omits fields a
 // live session actually carries proves less than one that doesn't.
-func heightSweepModel(width, height int) Model {
+//
+// Every session's Name is distinct so a test can tell WHICH rows a short pane
+// chose to draw, not merely how many.
+func heightSweepModel(n, width, height int) Model {
+	views := make([]session.View, n)
+	for i := range views {
+		views[i] = session.View{
+			Session: session.Session{
+				SessionID:       fmt.Sprintf("s%d", i),
+				Name:            sessionRowName(i),
+				CWD:             "/Users/x/Desktop/project",
+				Status:          "waiting",
+				Version:         "2.1.220",
+				StatusUpdatedAt: 1785322956268,
+			},
+			TTY:           "ttys017",
+			HasPreview:    true,
+			LastHuman:     strings.Repeat("word ", 400),
+			LastAssistant: strings.Repeat("word ", 400),
+			Tokens:        4242,
+			Cost:          12.34,
+		}
+	}
 	m := New()
 	next, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	m = next.(Model)
-	next, _ = m.Update(sessionsMsg{views: []session.View{{
-		Session: session.Session{
-			SessionID:       "s0",
-			Name:            "session-name",
-			CWD:             "/Users/x/Desktop/project",
-			Status:          "waiting",
-			Version:         "2.1.220",
-			StatusUpdatedAt: 1785322956268,
-		},
-		TTY:           "ttys017",
-		HasPreview:    true,
-		LastHuman:     strings.Repeat("word ", 400),
-		LastAssistant: strings.Repeat("word ", 400),
-		Tokens:        4242,
-		Cost:          12.34,
-	}}})
+	next, _ = m.Update(sessionsMsg{views: views})
 	return next.(Model)
 }
+
+// sessionRowName is the Name of heightSweepModel's i-th session, in a form a
+// row-presence check can match without matching its neighbours: "name-1" is a
+// substring of "name-13", so the trailing marker is what keeps
+// "is session 1 on screen?" from being answered by session 13.
+func sessionRowName(i int) string { return fmt.Sprintf("sess-%d-end", i) }
 
 // TestFrameStructurallySoundAcrossHeightSweep is the height-axis analog of
 // TestViewNeverExceedsTerminalWidth, and it is the test that would have
@@ -979,35 +1003,172 @@ func heightSweepModel(width, height int) Model {
 // pre-existing width sweep's own assertion) would need editing the moment
 // list-only mode shipped — and a test that has to change in lockstep with
 // the code it guards is not really pinning anything independent.
+//
+// SESSION COUNT IS PART OF THE FIXTURE, and for most of this branch it was the
+// part that made the sweep vacuous. With ONE session the list holds two lines
+// and fits at every height, so the invariant above was satisfied by the fixture
+// rather than by the layout: the list pane in fact lost its bottom border
+// whenever len(views)+1 exceeded its interior — 6 sessions broke heights 8-10,
+// and liveSessionCount broke every height from minTermHeight through 19, which
+// is this tool's normal case in any window shorter than a half screen. Both
+// counts are swept now; the small one is kept because it is the only one that
+// exercises a list SHORTER than its pane, where listWindow must not clip.
 func TestFrameStructurallySoundAcrossHeightSweep(t *testing.T) {
-	for _, w := range []int{minTermWidth, 60, 100} {
-		for h := minTermHeight; h <= 30; h++ {
-			for _, focus := range []focusArea{focusList, focusPreview} {
-				m := heightSweepModel(w, h)
-				m.focus = focus
-				frame := m.View()
+	for _, n := range []int{1, liveSessionCount} {
+		for _, w := range []int{minTermWidth, 60, 100} {
+			for h := minTermHeight; h <= 30; h++ {
+				for _, focus := range []focusArea{focusList, focusPreview} {
+					m := heightSweepModel(n, w, h)
+					m.focus = focus
+					frame := m.View()
 
-				open := strings.Count(frame, "╭")
-				closed := strings.Count(frame, "╯")
-				if open != closed {
-					t.Fatalf("width %d height %d focus %v: %d panes opened (╭) but %d closed (╯) — a pane's bottom border is broken:\n%s",
-						w, h, focus, open, closed, frame)
-				}
-				if open == 0 {
-					t.Fatalf("width %d height %d focus %v: frame has no panes at all — nothing to measure:\n%s",
-						w, h, focus, frame)
-				}
-
-				lines := strings.Split(frame, "\n")
-				if len(lines) > h {
-					t.Fatalf("width %d height %d focus %v: frame is %d lines, want <= %d (the terminal height):\n%s",
-						w, h, focus, len(lines), h, frame)
-				}
-				for i, ln := range lines {
-					if got := lipgloss.Width(ln); got > w {
-						t.Fatalf("width %d height %d focus %v: line %d is %d display columns, want <= %d:\n%q",
-							w, h, focus, i, got, w, visibleText(ln))
+					open := strings.Count(frame, "╭")
+					closed := strings.Count(frame, "╯")
+					if open != closed {
+						t.Fatalf("%d sessions, width %d height %d focus %v: %d panes opened (╭) but %d closed (╯) — a pane's bottom border is broken:\n%s",
+							n, w, h, focus, open, closed, frame)
 					}
+					if open == 0 {
+						t.Fatalf("%d sessions, width %d height %d focus %v: frame has no panes at all — nothing to measure:\n%s",
+							n, w, h, focus, frame)
+					}
+
+					lines := strings.Split(frame, "\n")
+					if len(lines) > h {
+						t.Fatalf("%d sessions, width %d height %d focus %v: frame is %d lines, want <= %d (the terminal height):\n%s",
+							n, w, h, focus, len(lines), h, frame)
+					}
+					for i, ln := range lines {
+						if got := lipgloss.Width(ln); got > w {
+							t.Fatalf("%d sessions, width %d height %d focus %v: line %d is %d display columns, want <= %d:\n%q",
+								n, w, h, focus, i, got, w, visibleText(ln))
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestSelectedRowIsAlwaysOnScreen is the other half of the clamp: a list pane
+// that draws only what fits must never drop the SELECTED row.
+//
+// Without this, "stop drawing outside the box" is satisfied completely by
+// rendering the first k sessions and letting the cursor walk off the bottom —
+// which is strictly worse than the overflow it replaces, because the user then
+// presses ⏎ on a session they cannot see. So this walks the cursor over every
+// index at every height and demands the selected row is on screen at each one.
+//
+// The row is identified by its own Name rather than by the "›" cursor glyph:
+// the glyph would still be rendered by a mutant that drew the cursor marker on
+// some other row, and the question here is which SESSION is visible.
+func TestSelectedRowIsAlwaysOnScreen(t *testing.T) {
+	const w = 100 // wide enough that a row's Name survives formatRow's clamp
+	for h := minTermHeight; h <= 30; h++ {
+		for cursor := 0; cursor < liveSessionCount; cursor++ {
+			m := heightSweepModel(liveSessionCount, w, h)
+			m.cursor = cursor
+			out := visibleText(m.View())
+
+			want := sessionRowName(cursor)
+			if !strings.Contains(out, want) {
+				t.Fatalf("height %d cursor %d: the selected session %q is not on screen:\n%s",
+					h, cursor, want, out)
+			}
+			// Guard against the assertion above holding because every row is on
+			// screen at every height — at which point it could not fail. At the
+			// short heights this test exists for, something must be clipped.
+			if h < 20 {
+				visible := 0
+				for i := 0; i < liveSessionCount; i++ {
+					if strings.Contains(out, sessionRowName(i)) {
+						visible++
+					}
+				}
+				if visible == liveSessionCount {
+					t.Fatalf("height %d: all %d rows fit, so this height proves nothing about clipping",
+						h, liveSessionCount)
+				}
+			}
+		}
+	}
+}
+
+// listTitleLineOf extracts the list pane's title from a rendered pane. It is
+// the SECOND line — the first is the pane's own top border — and taking the
+// first instead yields a run of "─" that contains none of the tokens below, so
+// the mistake shows up as a failure rather than as a silently weaker
+// assertion. Asserted here so it stays that way.
+func listTitleLineOf(t *testing.T, pane string) string {
+	t.Helper()
+	lines := strings.Split(visibleText(pane), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("rendered list pane has only %d lines, no title to read:\n%s", len(lines), pane)
+	}
+	if !strings.Contains(lines[1], "Sessions") {
+		t.Fatalf("expected the list title on line 1, got %q:\n%s", lines[1], pane)
+	}
+	return lines[1]
+}
+
+// TestListTitleReportsClippedRows pins the affordance in BOTH directions: a
+// windowed list must say so, and a complete one must not.
+//
+// The direction that matters is the first — a pane silently showing 6 of 15
+// sessions under a title reading "Sessions (15)" states the opposite of the
+// truth. But pinning only that is satisfied by a title that always shows a
+// range, which would then read "Sessions (1-15/15)" on a full list and invent a
+// clipping that is not happening.
+func TestListTitleReportsClippedRows(t *testing.T) {
+	const w = 100
+	for h := minTermHeight; h <= 30; h++ {
+		m := heightSweepModel(liveSessionCount, w, h)
+		m.cursor = 0
+		title := listTitleLineOf(t, m.renderList(w, bodyPaneHeight(h), listPane))
+
+		capacity := listCapacity(bodyPaneHeight(h))
+		_, shown := listWindow(liveSessionCount, 0, capacity)
+		if shown < liveSessionCount {
+			want := fmt.Sprintf("1-%d/%d", shown, liveSessionCount)
+			if !strings.Contains(title, want) {
+				t.Errorf("height %d: %d of %d rows are drawn but the title %q does not say so (want %q in it)",
+					h, shown, liveSessionCount, strings.TrimRight(title, " │"), want)
+			}
+		} else {
+			if strings.Contains(title, "/") {
+				t.Errorf("height %d: every row fits, but the title %q advertises a clipped window",
+					h, strings.TrimRight(title, " │"))
+			}
+			if !strings.Contains(title, fmt.Sprintf("(%d)", liveSessionCount)) {
+				t.Errorf("height %d: title %q must carry the plain session count",
+					h, strings.TrimRight(title, " │"))
+			}
+		}
+	}
+}
+
+// TestListTitleIsExactlyOneLine pins listTitleLines to the real output, the way
+// TestPreviewMetadataLineCountMatchesTheConstant pins previewMetadataLines. The
+// title's own width is what can break it: lipgloss WRAPS an over-wide line
+// rather than clipping it, so a two-line title silently costs the list pane a
+// row of capacity and then its bottom border.
+//
+// Swept over session counts whose rendered title is far wider than the narrowest
+// pane the layout accepts, so the clamp is genuinely exercised rather than
+// being satisfied by short numbers.
+func TestListTitleIsExactlyOneLine(t *testing.T) {
+	for _, total := range []int{0, 1, 15, 1000, 1000000} {
+		for innerW := 1; innerW <= 60; innerW++ {
+			for _, shown := range []int{0, 1, total / 2, total} {
+				first := max(0, min(total-shown, total/3))
+				got := listTitle(total, first, shown, innerW)
+				if lines := strings.Count(got, "\n") + 1; lines != listTitleLines {
+					t.Fatalf("total %d first %d shown %d innerW %d: title %q is %d lines, want listTitleLines = %d",
+						total, first, shown, innerW, got, lines, listTitleLines)
+				}
+				if w := lipgloss.Width(got); w > innerW {
+					t.Fatalf("total %d first %d shown %d innerW %d: title %q is %d display columns, want <= %d",
+						total, first, shown, innerW, got, w, innerW)
 				}
 			}
 		}
@@ -1028,7 +1189,7 @@ func TestPreviewPaneRendersAtHeight14ButNotHeight13(t *testing.T) {
 		{13, 1}, // one row shorter: list-only
 	}
 	for _, c := range cases {
-		m := heightSweepModel(100, c.height)
+		m := heightSweepModel(liveSessionCount, 100, c.height)
 		frame := m.View()
 		if got := strings.Count(frame, "╭"); got != c.wantPanes {
 			t.Errorf("height %d: %d panes opened (╭), want %d:\n%s", c.height, got, c.wantPanes, visibleText(frame))

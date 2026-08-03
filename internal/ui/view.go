@@ -109,6 +109,35 @@ func formatRow(v session.View, home string, now time.Time, width int) string {
 	return ansi.Truncate(row, width, "")
 }
 
+// listTitle composes the list pane's title line: the session count, and — when
+// the pane is too short to draw every session — WHICH rows of the list are on
+// screen ("Sessions (5-12/15)").
+//
+// The windowed form is the affordance for listWindow's clipping, and it has to
+// exist: a pane that silently drops nine of fifteen sessions while its title
+// still reads "Sessions (15)" tells the reader the opposite of the truth, and
+// the sessions it drops are exactly the ones they cannot see to go looking for.
+// Reusing the count the title already carries keeps that honest without adding
+// a scrollbar or any second piece of chrome to a pane that is short precisely
+// because there is no room.
+//
+// The result is always exactly ONE line, and that is load-bearing for the same
+// reason previewTitle's is: lipgloss word-WRAPS an over-wide line inside a
+// Style.Width() block rather than clipping it, so a title one column too wide
+// becomes two lines and costs the pane its own bottom border via MaxHeight.
+// Hence the clamp — the count grows with the session count and the digit widths
+// of the window bounds, and nothing else bounds it.
+func listTitle(total, first, shown, innerW int) string {
+	label := fmt.Sprintf("Sessions (%d)", total)
+	if shown < total {
+		label = fmt.Sprintf("Sessions (%d-%d/%d)", first+1, first+shown, total)
+	}
+	if innerW <= 0 {
+		return ""
+	}
+	return ansi.Truncate(label, innerW, "…")
+}
+
 // previewField renders one "Label: value" line in the preview pane.
 func previewField(label, value string) string {
 	return labelStyle.Render(label+":") + " " + value
@@ -201,8 +230,11 @@ func (m Model) View() string {
 		// nothing useful AND corrupts the frame is strictly worse than no pane
 		// at all, so draw the list alone at the full terminal width: it still
 		// does the tool's primary job (see sessions, press Enter to jump), and
-		// the list itself stays fully usable well below this threshold (4 of 6
-		// rows visible at minTermHeight, all 6 by height 10).
+		// the list itself stays usable well below this threshold — 3 rows at
+		// minTermHeight rising to 8 at height 13, always including the selected
+		// one, with the title saying which of them are on screen (see listWindow
+		// and listTitle). This is also the mode that needs those two most: the
+		// terminal is at its shortest here, so the list is at its most clipped.
 		//
 		// The list is always drawn with the "focused" border here: it is the
 		// only interactive pane on screen, so there is nothing for the border
@@ -276,12 +308,18 @@ func (m Model) renderList(width, height int, pane lipgloss.Style) string {
 	home, _ := os.UserHomeDir()
 	now := time.Now()
 
+	// Only the rows the pane's interior can actually hold — see listCapacity for
+	// what drawing more costs, and listWindow for why the selected row is always
+	// among them.
+	first, shown := listWindow(len(m.views), m.cursor, listCapacity(height))
+
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(fmt.Sprintf("Sessions (%d)", len(m.views))))
+	b.WriteString(titleStyle.Render(listTitle(len(m.views), first, shown, paneInnerWidth(width))))
 	if len(m.views) == 0 {
 		b.WriteString("\n  (no live sessions)")
 	}
-	for i, v := range m.views {
+	for i := first; i < first+shown; i++ {
+		v := m.views[i]
 		line := formatRow(v, home, now, inner)
 		switch {
 		case i == m.cursor:

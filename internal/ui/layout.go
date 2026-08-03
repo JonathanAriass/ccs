@@ -68,6 +68,63 @@ func paneInnerHeight(outerH int) int { return max(0, outerH-paneBorderH) }
 // another — so both call this rather than each computing m.height-footerLines.
 func bodyPaneHeight(termH int) int { return max(1, termH-footerLines) }
 
+// listTitleLines is how many rows renderList spends on its title before the
+// first session row. Same contract as previewMetadataLines: the number is
+// pinned to the real output by TestListTitleIsExactlyOneLine, and the rendered
+// output is the authority.
+const listTitleLines = 1
+
+// listCapacity is how many session ROWS the list pane can draw inside a pane of
+// the given outer height: its interior, minus the title.
+//
+// Drawing more than this does not merely overflow harmlessly. lipgloss renders
+// the pane's content and then MaxHeight-clips the whole box to its outer
+// height, and the bottom border is the LAST row of that box — so every row past
+// the interior costs the pane its bottom border, not the row itself. The list
+// then has no bottom edge at all and the frame's own structure is gone. With a
+// realistic fifteen live sessions that was every terminal height from
+// minTermHeight through 19; see listWindow for what is drawn instead.
+func listCapacity(paneOuterH int) int {
+	return max(0, paneInnerHeight(paneOuterH)-listTitleLines)
+}
+
+// listWindow returns the half-open range [first, first+n) of session rows the
+// list pane should draw, given how many there are, where the cursor is, and how
+// many rows fit (listCapacity).
+//
+// The window ALWAYS contains the cursor, and that is the load-bearing property:
+// a window that clipped the selected row would leave the user pressing ⏎ on a
+// session they cannot see, which is the one action this tool exists to perform.
+//
+// It is a pure function of (total, cursor, capacity) rather than a scroll
+// offset stored on the Model, deliberately. An offset would have to be
+// maintained by every path that moves the cursor (j, k, a re-sorting poll that
+// relocates the selection, a resize that changes the capacity) and by nothing
+// else — four places that must agree, i.e. four places that can drift. Deriving
+// the window means View and any future consumer cannot disagree about it.
+//
+// The cursor is kept mid-pane where possible (rather than only scrolling when
+// it would fall off an edge, which no stateless function can do) so the
+// selected row sits in a stable screen position while the list moves under it.
+// Out-of-range cursors — reconcile can leave -1 on an empty list, and tests set
+// it deliberately — clamp to the nearest valid window rather than panicking.
+func listWindow(total, cursor, capacity int) (first, n int) {
+	if capacity <= 0 || total <= 0 {
+		return 0, 0
+	}
+	if total <= capacity {
+		return 0, total
+	}
+	first = cursor - capacity/2
+	if first > total-capacity {
+		first = total - capacity
+	}
+	if first < 0 {
+		first = 0
+	}
+	return first, capacity
+}
+
 // previewBodyHeight is how many rows the scrollable exchange gets: whatever the
 // preview pane's interior has left after the pinned metadata block. Never
 // negative — not because SetContent would panic (it does not; verified
