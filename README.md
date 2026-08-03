@@ -54,8 +54,14 @@ tab to focus") rather than doing nothing.
 
     go build ./... && go vet ./... && gofmt -l . && go test ./... -race -count=1
 
-**`go test ./...` briefly steals your window focus, so it is not safe to run
-unattended alongside other work.** `TestFocusActuallyMovesFocus` is a genuine
+**`go test ./...` briefly moves your iTerm2 focus and puts it back.** A single
+invocation is safe to run as-is, and `-p 1` is *not* required: only
+`internal/iterm` touches focus, and its tests are already serial within a run.
+Two *simultaneous* invocations — two agents on one repo, a file-watcher
+alongside a manual run, two worktrees — would otherwise corrupt each other's
+focus measurements, so they are serialized by an advisory flock at
+`$TMPDIR/ccs-iterm-focus.lock`; the second one waits up to 60s rather than
+reporting a false failure. `TestFocusActuallyMovesFocus` is a genuine
 positive control: it focuses a *different* iTerm2 tab, asserts the frontmost
 session actually changed, and restores your original focus. Every other test in
 that package focuses the already-focused tab, where a Focus that does nothing at

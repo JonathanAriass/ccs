@@ -3,11 +3,93 @@ package iterm
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// focusLockPath serialises every test in this package that MOVES iTerm2's focus,
+// across processes.
+//
+// The hazard is not inside one test run. A single `go test ./...` is green, and
+// `-p 1` changes nothing — only this package touches focus, and its tests are
+// already serial within a run. The hazard is TWO OVERLAPPING INVOCATIONS: two
+// agents on one repo, a file-watcher alongside a manual run, two worktrees.
+// TestFocusActuallyMovesFocus focuses a tab and then reads back which tab is
+// frontmost, so another process focusing anything inside that window corrupts
+// the read. Measured here: with a second invocation issuing focus moves
+// continuously, 4 of 8 runs failed — and they failed with "the select/activate
+// block is inert", which accuses working production code of being a no-op.
+// Whoever chases that message deletes the positive control or "fixes"
+// focus.applescript. Hence a lock rather than a retry or a tolerance.
+//
+// The path must be FIXED and ABSOLUTE. A repo-relative lock would hand every
+// worktree and agent checkout its own file and protect nothing. os.TempDir()
+// honours $TMPDIR, which on macOS is the per-user DARWIN_USER_TEMP_DIR and is
+// byte-identical across separate `go test` invocations (verified). A runner that
+// set a per-invocation TMPDIR would silently un-protect these tests; nothing
+// does today, and hardcoding /tmp trades that for a world-writable path.
+var focusLockPath = filepath.Join(os.TempDir(), "ccs-iterm-focus.lock")
+
+// lockFocus blocks until this process owns the focus lock and releases it when
+// the test ends. Call it from any test that moves iTerm2's focus or reads back
+// which session is frontmost.
+func lockFocus(t *testing.T) {
+	t.Helper()
+	f := openFocusLock(t)
+	// The KERNEL drops an flock when the fd closes, including when the process
+	// is SIGKILLed, so a killed test binary cannot strand the lock. Registering
+	// the cleanup before acquiring also covers a Fatalf inside acquire.
+	t.Cleanup(func() { f.Close() })
+	acquireFocusLock(t, f)
+}
+
+func openFocusLock(t *testing.T) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(focusLockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("open focus lock %s: %v", focusLockPath, err)
+	}
+	return f
+}
+
+// acquireFocusLock WAITS for the lock; it never skips on contention. A positive
+// control that skips under load is a positive control that has stopped guarding.
+//
+// It polls with LOCK_NB instead of blocking in the kernel so that a wedge
+// surfaces as a named failure that points at the lock file, rather than as a
+// silent hang until the go test timeout.
+func acquireFocusLock(t *testing.T, f *os.File) {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			t.Fatalf("flock %s: %v", focusLockPath, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after 60s waiting for %s — another ccs focus test is still holding it",
+				focusLockPath)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// releaseFocusLock drops the lock while keeping the fd open, for the one test
+// that has to hand it over mid-run.
+func releaseFocusLock(t *testing.T, f *os.File) {
+	t.Helper()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("unlock %s: %v", focusLockPath, err)
+	}
+}
 
 func TestFocusRejectsEmptyTTY(t *testing.T) {
 	// Background/daemon sessions have no tty. This must fail fast without
@@ -126,6 +208,12 @@ func TestFocusActuallyMovesFocus(t *testing.T) {
 	// nothing", which is the one failure this package exists to prevent.
 	//
 	// So: focus a DIFFERENT tty and assert the frontmost session actually changed.
+	//
+	// That read-back is only meaningful if nothing else is moving focus, so take
+	// the cross-process lock BEFORE sampling `before` — sampling it outside the
+	// lock would let a concurrent run invalidate the baseline this test compares
+	// against. See focusLockPath.
+	lockFocus(t)
 	before := currentTTYForTest(t)
 	if before == "" {
 		t.Skip("cannot resolve the current tty")
@@ -163,6 +251,12 @@ func TestFocusResolvesArgvPastSeparator(t *testing.T) {
 	// "--", answer NOTFOUND for every tty, and Focus would return ErrNotFound
 	// always — indistinguishable from "that tab is genuinely gone". Assert that a
 	// tty which DOES exist resolves, so ErrNotFound means what it says.
+	//
+	// This does not MOVE focus, but it reads the current tty and then focuses
+	// it, so it must not interleave with another invocation's move — its Focus
+	// would otherwise land on a stale tty and drag focus out from under the
+	// other run's read-back.
+	lockFocus(t)
 	tty := currentTTYForTest(t) // a tty known to belong to a live iTerm2 session
 	if tty == "" {
 		t.Skip("no resolvable iTerm2 tty in this environment")
@@ -208,5 +302,75 @@ func TestFocusRunningGuardShortCircuits(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
 		t.Errorf("must fail fast without spawning osascript, took %v", elapsed)
+	}
+}
+
+// TestFocusMoveWaitsForTheCrossProcessLock pins that TestFocusActuallyMovesFocus
+// actually takes the lock, by DETERMINISTICALLY holding it and requiring the
+// other process to wait.
+//
+// It is deliberately not "spawn two runs and assert both pass". That shape was
+// measured: two simultaneous full-suite runs redden only about 1 pair in 8 by
+// chance, and two runs of just TestFocusActuallyMovesFocus reddened 0 of 8 — so
+// a race-and-hope test would sit green through a completely deleted lock most of
+// the time. Here the parent OWNS the contended resource and asserts the defining
+// property: a focus-moving test cannot proceed while another process holds the
+// lock. The 5s hold is >3x the child's measured 1.0-1.5s solo runtime, so "still
+// running" is a statement about the lock, not about scheduler luck.
+//
+// Two anti-vacuity guards, both load-bearing. The environment guards below
+// mirror the child's own, so this test SKIPS rather than passing when the child
+// could only skip. And the final assertion demands the literal
+// "--- PASS: TestFocusActuallyMovesFocus" in the child's -test.v output: a skip
+// prints "--- SKIP" and reddens here, which is what stops "child exited 0" from
+// being satisfied by a child that did nothing. It also catches a future rename
+// of TestFocusActuallyMovesFocus silently turning the child into a no-op run.
+func TestFocusMoveWaitsForTheCrossProcessLock(t *testing.T) {
+	if !Running() {
+		t.Skip("iTerm2 not running")
+	}
+	if len(allTTYsForTest(t)) < 2 {
+		t.Skip("only one iTerm2 session — the child would skip and prove nothing")
+	}
+
+	f := openFocusLock(t)
+	defer f.Close()
+	acquireFocusLock(t, f)
+
+	var out strings.Builder
+	// os.Args[0] is this test binary. The ^...$ anchor is what keeps the child
+	// from re-entering this test.
+	child := exec.Command(os.Args[0], "-test.run", "^TestFocusActuallyMovesFocus$", "-test.v")
+	child.Stdout, child.Stderr = &out, &out
+	if err := child.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+
+	const hold = 5 * time.Second
+	start := time.Now()
+	select {
+	case err := <-done:
+		releaseFocusLock(t, f)
+		t.Fatalf("child finished in %v, inside the %v this process held %s (err=%v) — "+
+			"TestFocusActuallyMovesFocus is not taking the cross-process focus lock.\n%s",
+			time.Since(start), hold, focusLockPath, err, out.String())
+	case <-time.After(hold):
+	}
+	releaseFocusLock(t, f)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("child failed after the lock was released: %v\n%s", err, out.String())
+		}
+	case <-time.After(60 * time.Second):
+		child.Process.Kill()
+		<-done // let the output-copying goroutines finish before reading out
+		t.Fatalf("child never finished after the lock was released\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "--- PASS: TestFocusActuallyMovesFocus") {
+		t.Fatalf("child did not actually RUN the focus move (skipped?):\n%s", out.String())
 	}
 }
