@@ -88,10 +88,26 @@ func formatRow(v session.View, home string, now time.Time, width int) string {
 	// DisplayName() can resolve to the transcript's ai-title (see its own doc
 	// comment), and CWD is drawn inside the same bordered pane as transcript
 	// text — both go through sanitize for the same reason lastMessage does.
-	name := truncateToWidth(sanitize(v.DisplayName()), nameW)
-	dir := elideMiddle(sanitize(homeAbbrev(v.CWD, home)), dirW)
+	//
+	// And all three then go through flattenToRow, because sanitize deliberately
+	// KEEPS newlines for the preview pane's sake: a row is one screen line, and
+	// a field that smuggles a "\n" into it makes that session several rows tall
+	// and shoves every session below it off the pane. All three fields, not just
+	// the message — an ai-title and a registry CWD are arbitrary content too.
+	//
+	// Before the clamps, not after: truncateToWidth and elideMiddle budget in
+	// DISPLAY COLUMNS and a newline measures as zero of them, so a clamp applied
+	// first keeps text from both sides of the newline — and flattening
+	// afterwards turns that zero-width byte into a real space, handing back a
+	// field one column WIDER than the budget it was just clamped to. The row
+	// then overruns and the ansi.Truncate net below takes the difference out of
+	// the last field on it, the message. Pinned by
+	// TestFormatRowDrawsANewlineFieldExactlyLikeTheSingleLineItMeans, which is
+	// the only test in the package that fails when the two are swapped.
+	name := truncateToWidth(flattenToRow(sanitize(v.DisplayName())), nameW)
+	dir := elideMiddle(flattenToRow(sanitize(homeAbbrev(v.CWD, home))), dirW)
 	age := compactAge(v.StatusUpdatedTime(), now)
-	msg := truncateToWidth(sanitize(lastMessage(v)), msgW)
+	msg := truncateToWidth(flattenToRow(sanitize(lastMessage(v))), msgW)
 
 	row := fmt.Sprintf("%s %-*s %-*s %*s %s", glyph, nameW, name, dirW, dir, ageWidth, age, msg)
 

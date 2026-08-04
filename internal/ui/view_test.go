@@ -57,6 +57,18 @@ func titleOf(m Model) string {
 	return visibleText(line)
 }
 
+// controlChars lists the C0 control characters and DELs left in s.
+//
+// NEWLINES ARE SKIPPED, and that skip is not full coverage of newlines — it is
+// the absence of it. A rendered FRAME is made of newlines (one per screen row),
+// so a helper that flagged them would flag every frame; but that also means the
+// sanitize tests below cannot see a stray newline INSIDE a list row, which is a
+// real bug that shipped: sanitize deliberately preserves newlines for the
+// preview pane, and a row that keeps one draws that session across several
+// screen rows. That invariant is pinned separately and at the right altitude by
+// TestFormatRowIsAlwaysExactlyOneLine (the row) and
+// TestListPaneDrawsExactlyOneRowPerSession (the pane). Do not "strengthen" this
+// helper to cover it — assert on the row, not on the frame.
 func controlChars(s string) []string {
 	var found []string
 	for _, r := range s {
@@ -340,6 +352,264 @@ func TestFormatRowKeepsLaterFieldsOnTheRow(t *testing.T) {
 		if !strings.Contains(row, rowMsgMarker) {
 			t.Errorf("%s: the last-message column is gone from %q — an earlier field overran its budget",
 				name, row)
+		}
+	}
+}
+
+// multiLineFixture is one session whose fields carry newlines, plus the text
+// that FOLLOWS each newline. tails is what keeps the single-line assertions
+// below from passing vacuously: a row that clipped the field before its newline
+// has no newline either, and would satisfy them while showing the user less
+// than it should.
+type multiLineFixture struct {
+	view session.View
+	// flat is the same session with every field already written as the single
+	// line it should flatten to — the row a reader should see.
+	flat  session.View
+	tails []string
+}
+
+// multiLineRowFixtures covers the three text fields a row draws, ONE FIELD AT A
+// TIME and then all together.
+//
+// Per-field matters: the observed bug came in through the last message, but
+// DisplayName() resolves to a transcript ai-title and CWD comes from the
+// registry, so all three are arbitrary content and all three can carry a
+// newline. A fixture that only ever puts one in the message cannot tell a fix
+// applied to all three from a fix applied to the message alone.
+//
+// The message is the real one that produced the three-row session observed at
+// 118x30 against the live registry: a sentence, a BLANK line, then a markdown
+// heading.
+func multiLineRowFixtures() map[string]multiLineFixture {
+	base := func(name, cwd, msg string) session.View {
+		return session.View{
+			Session: session.Session{
+				Name:            name,
+				CWD:             cwd,
+				Status:          "idle",
+				StatusUpdatedAt: time.Now().Add(-3 * time.Hour).UnixMilli(),
+			},
+			LastAssistant: msg,
+		}
+	}
+	const (
+		plainName = "session-name"
+		plainCWD  = "/x/okt-api"
+		plainMsg  = "all done here"
+
+		nlName   = "Configure CSV\nexport"
+		flatName = "Configure CSV export"
+		nlCWD    = "/x/okt\n-api"
+		flatCWD  = "/x/okt -api"
+		nlMsg    = "Written to `pr.md`.\n\n## Heading\nmore text"
+		// One space for the blank-line run, not two or three.
+		flatMsg = "Written to `pr.md`. ## Heading more text"
+	)
+	return map[string]multiLineFixture{
+		"newline in name": {
+			base(nlName, plainCWD, plainMsg),
+			base(flatName, plainCWD, plainMsg),
+			[]string{"export"},
+		},
+		"newline in cwd": {
+			base(plainName, nlCWD, plainMsg),
+			base(plainName, flatCWD, plainMsg),
+			[]string{"-api"},
+		},
+		"newline in message": {
+			base(plainName, plainCWD, nlMsg),
+			base(plainName, plainCWD, flatMsg),
+			[]string{"## Heading", "more text"},
+		},
+		"newline in all three": {
+			base(nlName, nlCWD, nlMsg),
+			base(flatName, flatCWD, flatMsg),
+			[]string{"export", "-api", "## Heading", "more text"},
+		},
+	}
+}
+
+// TestFormatRowDrawsANewlineFieldExactlyLikeTheSingleLineItMeans states the
+// whole contract as one equality, at every width: a field carrying newlines
+// must render byte for byte like the single line it flattens to.
+//
+// It is the ORDER of flatten and clamp that this catches and nothing else in
+// this file does. Clamping first is not a cosmetic difference: truncateToWidth
+// and elideMiddle budget in DISPLAY COLUMNS and a newline measures as zero of
+// them, so a clamp applied first keeps text from both sides of the newline —
+// and flattening afterwards turns that zero-width byte into a real space, so
+// the field comes back one column WIDER than the budget it was just clamped to.
+// The row then overruns and formatRow's ansi.Truncate net takes the difference
+// out of the last field on the row, the message. Verified: with the two swapped,
+// every other test in this package stays green.
+//
+// The comparison is against a hand-written flat fixture rather than against
+// formatRow's own output, so it says what the reader should SEE ("a newline
+// reads as a space, a blank line as one space too") instead of restating the
+// implementation.
+func TestFormatRowDrawsANewlineFieldExactlyLikeTheSingleLineItMeans(t *testing.T) {
+	now := time.Now()
+	for name, f := range multiLineRowFixtures() {
+		for width := 0; width <= 120; width++ {
+			got := formatRow(f.view, "", now, width)
+			want := formatRow(f.flat, "", now, width)
+			if got != want {
+				t.Errorf("%s: at width %d the newline fixture renders as\n\t%q\nbut the same text written on one line renders as\n\t%q",
+					name, width, visibleText(got), visibleText(want))
+				break
+			}
+		}
+	}
+}
+
+// TestFormatRowIsAlwaysExactlyOneLine is the regression test for a bug found by
+// running the real binary against the real session registry: a session whose
+// last message contained newlines rendered across THREE screen rows — the
+// second blank, the third carrying no glyph, no name and no age — and pushed
+// every session below it down and off the pane.
+//
+// sanitize() deliberately preserves newlines (it splits on them, sanitizes each
+// line and rejoins), which is correct for the preview pane and wrong for a
+// single-line row: nothing between sanitize and the screen removes them.
+// formatRow's ansi.Truncate net does not, either — it measures a newline as
+// zero columns and passes it through, so a row can be "within budget" and still
+// be several rows tall.
+//
+// The width sweep starts at 0 for the same reason the display-column sweep
+// above does, but the wide end is what carries the test: a narrow row clips its
+// fields before their newlines. That is exactly the vacuity the tails check
+// closes.
+func TestFormatRowIsAlwaysExactlyOneLine(t *testing.T) {
+	// 118 columns is the terminal the bug was observed in, and it is wide enough
+	// that every fixture field below reaches the row untruncated.
+	const observedWidth = 118
+	now := time.Now()
+	for name, f := range multiLineRowFixtures() {
+		for width := 0; width <= 120; width++ {
+			row := formatRow(f.view, "", now, width)
+			if n := strings.Count(row, "\n"); n > 0 {
+				t.Errorf("%s: formatRow at width %d contains %d newline(s), so this session draws across %d screen rows: %q",
+					name, width, n, n+1, visibleText(row))
+				break
+			}
+		}
+		row := visibleText(formatRow(f.view, "", now, observedWidth))
+		for _, tail := range f.tails {
+			if !strings.Contains(row, tail) {
+				t.Errorf("%s: %q — the text after a newline — is missing from %q; flattening must JOIN the lines, not keep only the first (and the sweep above passes vacuously on a field clipped before its newline)",
+					name, tail, row)
+			}
+		}
+	}
+}
+
+// listPaneContentLines returns the non-blank text lines inside a rendered
+// pane's border: its title, then one line per row it drew.
+//
+// Border rows are dropped by content, not by index, so a pane that LOST its
+// bottom border (lipgloss MaxHeight-clips the box, and the border is its last
+// row — see listCapacity) still parses instead of throwing the count off by
+// one. Blank lines are dropped because the pane pads its interior to its full
+// Height, and because a "\n\n" in a message renders as a genuinely empty row
+// that no line count can distinguish from that padding — every fixture below
+// therefore puts visible text after each newline.
+func listPaneContentLines(pane string) []string {
+	var out []string
+	for _, ln := range strings.Split(visibleText(pane), "\n") {
+		s := strings.Trim(ln, "│ ")
+		if s == "" || strings.Trim(s, "─╭╮╰╯") == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// multiLineRowName / multiLineRowMsg are the i-th fixture session's name and
+// last message for the list-pane test below. Each carries a marker AFTER its
+// newline, so a test can ask which session a given screen line belongs to and
+// whether the text past the newline survived. The "-end" suffix keeps "NAME1"
+// from matching "NAME11" should the fixture ever grow.
+func multiLineRowName(i int) string { return fmt.Sprintf("s%d\nNAME%d-end", i, i) }
+func multiLineRowMsg(i int) string  { return fmt.Sprintf("m%d\n\n## MSG%d-end", i, i) }
+
+// TestListPaneDrawsExactlyOneRowPerSession is the frame-level half of the
+// invariant TestFormatRowIsAlwaysExactlyOneLine pins on the row itself: what
+// the user actually saw was not "a string with a newline in it", it was a list
+// where one session occupied three rows and the sessions below it fell off the
+// pane.
+//
+// FOUR sessions, so a row that spans two lines is not confusable with an
+// off-by-one, and every field of every one of them carries a newline.
+func TestListPaneDrawsExactlyOneRowPerSession(t *testing.T) {
+	const n, w, h = 4, 118, 30
+	views := make([]session.View, n)
+	for i := range views {
+		views[i] = session.View{
+			Session: session.Session{
+				SessionID:       fmt.Sprintf("s%d", i),
+				Name:            multiLineRowName(i),
+				CWD:             "/a\n/b",
+				Status:          "idle",
+				StatusUpdatedAt: 1785322956268,
+			},
+			TTY:           "ttys017",
+			LastAssistant: multiLineRowMsg(i),
+		}
+	}
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m = next.(Model)
+	next, _ = m.Update(sessionsMsg{views: views})
+	m = next.(Model)
+
+	listW, _ := paneWidths(w)
+	paneH := bodyPaneHeight(h)
+	// The pane must have room to DRAW the extra lines, or the bug would be
+	// hidden by the same MaxHeight clipping that would otherwise cost it its
+	// bottom border, and the count below would come out right for the wrong
+	// reason.
+	if room, need := paneInnerHeight(paneH), 1+4*n; room < need {
+		t.Fatalf("pane interior is %d rows; a multi-line render needs up to %d to be visible at all", room, need)
+	}
+	if got := listCapacity(paneH); got < n {
+		t.Fatalf("list capacity is %d rows, fewer than the %d sessions — some would be windowed out", got, n)
+	}
+
+	pane := m.renderList(listW, paneH, listPane)
+	lines := listPaneContentLines(pane)
+	if len(lines) != n+1 {
+		t.Fatalf("list pane drew %d content lines, want %d (one title + one row per session):\n%s",
+			len(lines), n+1, pane)
+	}
+	if !strings.Contains(lines[0], "Sessions") {
+		t.Fatalf("expected the pane title first, got %q:\n%s", lines[0], pane)
+	}
+	// A count alone is satisfied by n rows that all show the same session, so
+	// pin WHICH session each row is — and that the text after each field's
+	// newline came with it.
+	for i := 0; i < n; i++ {
+		nameTail, msgTail := fmt.Sprintf("NAME%d-end", i), fmt.Sprintf("MSG%d-end", i)
+		var found string
+		hits := 0
+		for _, ln := range lines[1:] {
+			if strings.Contains(ln, nameTail) {
+				hits++
+				found = ln
+			}
+		}
+		if hits != 1 {
+			t.Errorf("session %d's name appears on %d rows, want exactly 1:\n%s", i, hits, pane)
+			continue
+		}
+		if !strings.Contains(found, msgTail) {
+			t.Errorf("session %d's row %q lost the text after its message's newline (%q):\n%s",
+				i, found, msgTail, pane)
+		}
+		if !strings.Contains(found, "/a /b") {
+			t.Errorf("session %d's row %q does not show its CWD's two lines joined by a space:\n%s",
+				i, found, pane)
 		}
 	}
 }

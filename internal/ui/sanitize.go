@@ -43,6 +43,76 @@ func sanitize(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// flattenToRow collapses s onto a single line, for the fields drawn in a
+// one-line list row.
+//
+// It exists because sanitize() deliberately KEEPS newlines — it is shared with
+// the preview pane, which renders a multi-line exchange and must not have it
+// run together. Nothing else between a transcript and the screen removes them:
+// formatRow's ansi.Truncate net measures "\n" as zero columns and passes it
+// through, so a row can sit inside its width budget and still be three screen
+// lines tall. Observed live at 118x30 — a session whose last assistant message
+// was "Written to `pr.md`.\n\n## …" occupied three rows of the list (the second
+// blank, the third carrying no glyph, no name and no age) and pushed every
+// session below it down and off the pane.
+//
+// SEMANTICS: every maximal run of whitespace that contains a newline becomes a
+// single space, and the result is trimmed. Two deliberate choices there:
+//
+//   - JOIN rather than keep the first line. A message that opens with a code
+//     fence or a markdown heading would otherwise show "```" and nothing else,
+//     which is the same "column that says nothing" defect in a new place. The
+//     column is narrow, so what it does show should be words.
+//   - Collapse the whole RUN, not each newline. A blank line is two newlines,
+//     and a heading is usually preceded by one, so collapsing newline-by-newline
+//     spends two or three of a ~23-column budget on spaces. Indentation adjacent
+//     to a newline goes the same way and for the same reason.
+//
+// A string with no newline is returned unchanged rather than trimmed or
+// re-spaced: this is a fix for newlines specifically, and every other field in
+// the row should keep rendering exactly as it did.
+func flattenToRow(s string) string {
+	if !strings.Contains(s, "\n") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		// Byte-wise, not rune-wise: every byte of a multi-byte rune is >= 0x80,
+		// so no continuation byte can be mistaken for whitespace and copying
+		// bytes verbatim leaves those runes intact.
+		if !isRowSpace(s[i]) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j, newline := i, false
+		for ; j < len(s) && isRowSpace(s[j]); j++ {
+			if s[j] == '\n' {
+				newline = true
+			}
+		}
+		if newline {
+			b.WriteByte(' ')
+		} else {
+			b.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// isRowSpace reports whether c is one of the ASCII whitespace bytes a run may
+// be made of. Only ASCII: a terminal breaks a line on "\n" and nothing else, so
+// the Unicode space characters are ordinary printable content here.
+func isRowSpace(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
+}
+
 // needsSanitizing is a cheap byte scan so the common all-printable case
 // avoids rebuilding the string. Newlines are row separators, not content.
 func needsSanitizing(s string) bool {

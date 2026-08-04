@@ -95,6 +95,51 @@ func TestSanitizePreservesNewlinesAndResetsTabColumnPerLine(t *testing.T) {
 	}
 }
 
+// flattenToRow's semantics, stated as cases. The property that matters to the
+// list pane — "the result never contains a newline" — is pinned at the row and
+// frame level by TestFormatRowIsAlwaysExactlyOneLine and
+// TestListPaneDrawsExactlyOneRowPerSession; this pins WHAT the flattened text
+// looks like, which those two cannot say much about.
+func TestFlattenToRowCollapsesWhitespaceRunsContainingNewlines(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"no newline is returned untouched", "plain  text\ttab", "plain  text\ttab"},
+		{"a newline becomes one space", "first\nsecond", "first second"},
+		{
+			// The observed message. A blank line is a two-newline run: collapsing
+			// each newline separately would leave a two-space gap in a column
+			// where every column is scarce.
+			"a blank line does not become a run of spaces",
+			"Written to `pr.md`.\n\n## Heading",
+			"Written to `pr.md`. ## Heading",
+		},
+		{"indentation around a newline collapses with it", "end of line\n    indented", "end of line indented"},
+		{"leading and trailing newlines are trimmed, not turned into spaces", "\n\nbody\n\n", "body"},
+		{"a whitespace run with no newline in it is left alone", "two  spaces\nand\ttab", "two  spaces and\ttab"},
+		{"newlines only", "\n\n\n", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := flattenToRow(c.in)
+			if got != c.want {
+				t.Errorf("flattenToRow(%q) = %q want %q", c.in, got, c.want)
+			}
+			if strings.Contains(got, "\n") {
+				t.Errorf("flattenToRow(%q) = %q, which still contains a newline", c.in, got)
+			}
+		})
+	}
+}
+
+// Multi-byte runes are copied byte by byte, so this pins that the scan does not
+// corrupt them — a UTF-8 continuation byte is never mistaken for whitespace.
+func TestFlattenToRowPreservesMultiByteRunes(t *testing.T) {
+	if got, want := flattenToRow("完了\n完了"), "完了 完了"; got != want {
+		t.Errorf("flattenToRow = %q want %q", got, want)
+	}
+}
+
 func TestNeedsSanitizingFastPath(t *testing.T) {
 	cases := []struct {
 		in   string
