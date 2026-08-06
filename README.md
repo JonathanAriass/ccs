@@ -38,14 +38,14 @@ unrelated process, are filtered out — dead entries never show up as ghosts.
 
 **The preview follows the newest activity.** The "Last assistant" half shows
 whichever source — the main thread or a subagent — changed most recently, and
-is labeled `⚙ <agent name>` whenever that source is a subagent, so a stale
-main-thread reply is never mistaken for a live one. The "Last human" half is
-always the main thread's, since that's who the user is actually talking to.
-The `Activity:` line in the pinned metadata reports how long ago that live
-source last changed, reading `-` when nothing is on disk to time (a purged
-transcript under a still-running process shows this too, with the preview
-body reading `no preview (transcript missing)` instead of the plain `no
-preview`).
+is labeled `⚙ <agent name>` whenever that source is a subagent that has
+produced text; a just-spawned subagent shows a fresh `Activity:` beside the
+main thread's last reply instead. The "Last human" half is always the main
+thread's, since that's who the user is actually talking to. The `Activity:`
+line in the pinned metadata reports how long ago that live source last
+changed, reading `-` when nothing is on disk to time (a purged transcript
+under a still-running process shows this too, with the preview body reading
+`no preview (transcript missing)` instead of the plain `no preview`).
 
 **Cost is main-thread-only.** The Tokens/Cost figures in the preview pane
 cover the session's main conversation thread — they do not include any

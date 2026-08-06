@@ -269,8 +269,10 @@ func rowWidths(total int) (name, dir, msg int) {
 	return
 }
 
-// compactAge renders a status-transition instant as a short relative age for
-// the list row: "now", "5m", "3h", "2d".
+// compactAge renders an instant as a short relative age: "now", "5m", "3h",
+// "2d" — a status-transition instant for the list row, or (since Task 2) a
+// live-source mtime for the preview pane's Activity line. Same format either
+// way; the caller decides what instant it means.
 //
 // It takes a time.Time, NOT a raw registry integer: the registry stores
 // statusUpdatedAt in milliseconds, and an earlier version of this function took

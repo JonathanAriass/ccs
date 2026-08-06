@@ -952,16 +952,38 @@ func TestEnterJumpsRegardlessOfFocus(t *testing.T) {
 	}
 }
 
+// TestPreviewMetadataLineCountMatchesTheConstant is, by itself, "the only
+// link between the rendered block and the number" previewBodyHeight
+// subtracts from the pane height — if the metadata block gains or loses a
+// line, the viewport is silently mis-sized: content clipped, or the pane
+// overflowing its own border.
+//
+// BOTH ActivityAt states are counted, and that is not belt-and-suspenders:
+// the Activity line is the block's first line whose CONTENT branches on view
+// state (compactAge's "-" placeholder vs a real age) while its WRITE does
+// not — a fixture that only ever leaves ActivityAt zero (every OTHER fixture
+// in this package does) cannot tell that unconditional write apart from a
+// mutant that appends the line only in the non-zero state, or only in the
+// zero one: whichever state the fixture never visits renders the wrong count
+// with the whole suite green. Asserting both closes that gap for both
+// mutants at once.
 func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
-	// previewBodyHeight subtracts a CONSTANT from the pane height. If the
-	// metadata block gains or loses a line, the viewport is silently mis-sized
-	// — content clipped, or the pane overflowing its own border. This test is
-	// the only link between the rendered block and the number.
 	m := modelWithOverflowingPreview(t, 1)
 	_, previewW := paneWidths(m.width)
-	got := strings.Count(m.renderPreviewMetadata(m.selected(), paneInnerWidth(previewW), fixedNow), "\n") + 1
-	if got != previewMetadataLines {
-		t.Errorf("metadata renders %d lines, previewMetadataLines = %d", got, previewMetadataLines)
+	innerW := paneInnerWidth(previewW)
+
+	for _, c := range []struct {
+		name       string
+		activityAt time.Time
+	}{
+		{"nothing on disk (renders \"Activity: -\")", time.Time{}},
+		{"a real age (renders \"Activity: 44m\")", fixedNow.Add(-44 * time.Minute)},
+	} {
+		m.views[0].ActivityAt = c.activityAt
+		got := strings.Count(m.renderPreviewMetadata(m.selected(), innerW, fixedNow), "\n") + 1
+		if got != previewMetadataLines {
+			t.Errorf("%s: metadata renders %d lines, previewMetadataLines = %d", c.name, got, previewMetadataLines)
+		}
 	}
 }
 
@@ -1009,8 +1031,8 @@ func TestFocusIgnoresStalePolledTTYForAnUnknownPID(t *testing.T) {
 
 // shrunkBelowThePreviewThreshold returns a 3-session model with the cursor at
 // the given index, the preview pane FOCUSED, scrolled away from the top, and
-// the terminal then resized one row below previewFits' threshold — the exact
-// state the dead-key hazard lives in.
+// the terminal then resized below previewFits' threshold (height 13, two rows
+// under the boundary at 15) — the exact state the dead-key hazard lives in.
 //
 // Every step is asserted rather than assumed: if the preview were already
 // invisible at the starting size, or focus did not survive the resize, or the
@@ -1121,9 +1143,6 @@ func TestJAndKDoNotScrollAnInvisiblePreview(t *testing.T) {
 	}
 }
 
-// TestTabIsNoOpWhenPreviewNotVisible pins the other half of "focus must not
-// point at a pane that isn't drawn": with no second pane to switch TO, Tab
-// must not toggle m.focus (and must not schedule a command).
 // TestPreviewShowsActivityAgeAndSourceLabel pins the two new affordances in
 // both directions each: age line present and derived from ActivityAt; label
 // present exactly when a subagent is live.
@@ -1157,6 +1176,9 @@ func TestPreviewAgeDashWhenNothingOnDisk(t *testing.T) {
 	}
 }
 
+// TestTabIsNoOpWhenPreviewNotVisible pins the other half of "focus must not
+// point at a pane that isn't drawn": with no second pane to switch TO, Tab
+// must not toggle m.focus (and must not schedule a command).
 func TestTabIsNoOpWhenPreviewNotVisible(t *testing.T) {
 	m := modelWithOverflowingPreview(t, 3)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13})

@@ -247,7 +247,11 @@ func (m Model) View() string {
 	}
 
 	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
-	now := time.Now()                 // shared by every clock-relative field this frame draws
+	// Shared by the preview pane's clock-relative fields (renderPreviewMetadata's
+	// Activity line). renderList still reads its own time.Now() for the list
+	// rows' age column — the two are microseconds apart within one frame, close
+	// enough that no test (or reader) needs them to be the same instant.
+	now := time.Now()
 
 	var body string
 	if !m.previewVisible() {
