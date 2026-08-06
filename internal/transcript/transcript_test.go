@@ -203,8 +203,22 @@ func buildSessionTree(t *testing.T, dir string, mainAge, teammateAge, workflowAg
 	main := mk("sess-1.jsonl", `{"type":"assistant","message":{"content":[{"type":"text","text":"MAIN-TEXT"}]}}`+"\n", mainAge)
 	mk("sess-1/subagents/agent-aimpl-fix2-0123456789abcdef.jsonl",
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"TEAMMATE-TEXT"}]}}`+"\n", teammateAge)
-	mk("sess-1/subagents/workflows/wf_x-1/agent-0123456789abcdef0.jsonl",
+	// Real unnamed (workflow) agent files are "agent-a<16 hex>" — the "a" marker
+	// IS present, there is just no separate name and no trailing "-<hex>" for
+	// agentNamePat to match. (task-1 review, Minor 2: an earlier fixture here
+	// used "agent-<17 hex>", a shape absent from the real corpus that happened
+	// to fall back to "agent" for a different reason — a missing "a" marker,
+	// not a missing name-tail — so it didn't actually cover this case.)
+	mk("sess-1/subagents/workflows/wf_x-1/agent-a15f8508938729d84.jsonl",
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"WORKFLOW-TEXT"}]}}`+"\n", workflowAge)
+	// A .meta.json sidecar sits beside every real subagent transcript in the
+	// actual corpus (737 of them, one per .jsonl). Given the newest mtime of the
+	// whole tree — well under any age a caller passes for the three sources
+	// above — so a LiveSource that forgot to filter by extension (task-1
+	// review, Important 2) would hand this path back as "live" instead of
+	// degrading to one of the three real sources.
+	mk("sess-1/subagents/agent-aimpl-fix2-0123456789abcdef.meta.json",
+		`{"agentType":"impl-fix2"}`, time.Second)
 	return main
 }
 
@@ -223,6 +237,12 @@ func TestLiveSourcePicksNewestAcrossMainAndSubagents(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			main := buildSessionTree(t, t.TempDir(), c.mainAge, c.tmAge, c.wfAge)
 			src := LiveSource(main)
+			// The .meta.json sidecar buildSessionTree writes is always the newest
+			// file in the tree — this pins the extension filter (task-1 review,
+			// Important 2), not just the three real sources' relative ordering.
+			if filepath.Ext(src.Path) != ".jsonl" {
+				t.Fatalf("picked a non-.jsonl file as the live source: %s", src.Path)
+			}
 			if src.Agent != c.wantAgent {
 				t.Fatalf("Agent = %q, want %q (picked %s)", src.Agent, c.wantAgent, src.Path)
 			}
@@ -250,6 +270,9 @@ func TestLiveSourceMainMissingButSubagentsExist(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := LiveSource(main)
+	if filepath.Ext(src.Path) != ".jsonl" {
+		t.Fatalf("picked a non-.jsonl file as the live source: %s", src.Path)
+	}
 	if src.Agent != "impl-fix2" {
 		t.Fatalf("want the teammate as live source when main is purged, got %+v", src)
 	}

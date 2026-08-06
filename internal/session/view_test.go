@@ -313,6 +313,7 @@ func TestCollectFollowsTheLiveSource(t *testing.T) {
 	reg := registryWithSession(t, self, start, "/tmp/proj", "sess-1")
 
 	proj := filepath.Join(home, ".claude", "projects", transcript.Slug("/tmp/proj"))
+	subPath := filepath.Join(proj, "sess-1/subagents/agent-aworker-1-00112233445566aa.jsonl")
 	now := time.Now()
 	mk := func(rel, content string, age time.Duration) {
 		p := filepath.Join(proj, rel)
@@ -347,28 +348,122 @@ func TestCollectFollowsTheLiveSource(t *testing.T) {
 	})
 
 	t.Run("main newer: pure main, no label", func(t *testing.T) {
-		mk("sess-1.jsonl", mainRec, time.Minute)
-		// subagent file from the previous subtest is now OLDER
-		views, _ := Collect(reg, home)
+		// Depends on the subagent file the previous subtest left on disk (age
+		// time.Minute). Guarded so this cannot pass standalone under a -run
+		// filter with the competing file never built (task-1 review, Important
+		// 1, point 4 / the -run repro).
+		if _, err := os.Stat(subPath); err != nil {
+			t.Fatalf("scenario not built: the subagent file from the previous subtest is missing (%v) — this subtest cannot run standalone", err)
+		}
+		// 10s is genuinely newer than the subagent's leftover 1-minute mtime —
+		// not a tie. (task-1 review, Important 1: the original fixture reused
+		// the same age as the tie subtest below and passed only because .After
+		// is strict and best seeds from main, not because main was newer.)
+		mk("sess-1.jsonl", mainRec, 10*time.Second)
+		views, err := Collect(reg, home)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
 		v := views[0]
 		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
 			t.Errorf("main-newest: LastAssistant=%q LiveAgent=%q", v.LastAssistant, v.LiveAgent)
 		}
 	})
 
+	t.Run("exact mtime tie: main wins", func(t *testing.T) {
+		// The real contract the old "main newer" subtest was accidentally
+		// pinning (task-1 review, Important 1, point 4): LiveSource seeds `best`
+		// from main and compares with strict After, so an exact tie must resolve
+		// to main. Both files are set to the identical instant explicitly, not
+		// by coincidence of shared write timing.
+		tie := 5 * time.Minute
+		mk("sess-1.jsonl", mainRec, tie)
+		mk("sess-1/subagents/agent-aworker-1-00112233445566aa.jsonl",
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"SUB-TIE"}]}}`+"\n", tie)
+		mainSt, err := os.Stat(filepath.Join(proj, "sess-1.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		subSt, err := os.Stat(subPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !mainSt.ModTime().Equal(subSt.ModTime()) {
+			t.Fatalf("fixture bug: main and subagent mtimes are not actually tied (%v vs %v)", mainSt.ModTime(), subSt.ModTime())
+		}
+		views, err := Collect(reg, home)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
+		v := views[0]
+		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
+			t.Errorf("a tied mtime must resolve to main: LastAssistant=%q LiveAgent=%q", v.LastAssistant, v.LiveAgent)
+		}
+	})
+
 	t.Run("live subagent unreadable: falls back to main, label cleared", func(t *testing.T) {
 		mk("sess-1.jsonl", mainRec, time.Hour)
 		mk("sess-1/subagents/agent-aworker-1-00112233445566aa.jsonl", "", time.Minute) // empty file: Read yields nothing
-		views, _ := Collect(reg, home)
+		views, err := Collect(reg, home)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
 		v := views[0]
 		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
 			t.Errorf("fallback: LastAssistant=%q LiveAgent=%q — a lying label is worse than no label", v.LastAssistant, v.LiveAgent)
 		}
 	})
 
+	t.Run("main absent, subagent only: preview still populates", func(t *testing.T) {
+		// task-1 review, Important 3: v.HasPreview = true in the subagent branch
+		// (view.go:122, now :127) had zero coverage. Real shape per Collect's own
+		// comment (view.go:91-93): 4 of 14 live sessions have main purged/empty
+		// while a live subagent carries real text. Independent tree — must not
+		// inherit the shared `home`/`proj` above.
+		home2 := t.TempDir()
+		reg2 := registryWithSession(t, self, start, "/tmp/proj2", "sess-2")
+		proj2 := filepath.Join(home2, ".claude", "projects", transcript.Slug("/tmp/proj2"))
+		now2 := time.Now()
+		mk2 := func(rel, content string, age time.Duration) {
+			p := filepath.Join(proj2, rel)
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, []byte(content), 0o644)
+			os.Chtimes(p, now2.Add(-age), now2.Add(-age))
+		}
+		mk2("sess-2/subagents/agent-aworker-1-00112233445566aa.jsonl",
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"SUB-ONLY"}]}}`+"\n", time.Minute)
+
+		views, err := Collect(reg2, home2)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
+		v := views[0]
+		if v.LastAssistant != "SUB-ONLY" {
+			t.Errorf("LastAssistant = %q, want SUB-ONLY", v.LastAssistant)
+		}
+		if v.LiveAgent != "worker-1" {
+			t.Errorf("LiveAgent = %q", v.LiveAgent)
+		}
+		if !v.HasPreview {
+			t.Error("HasPreview must be true: the live subagent has real text even though main is absent")
+		}
+		if v.LastHuman != "" {
+			t.Errorf("LastHuman = %q, want empty — no main thread exists", v.LastHuman)
+		}
+	})
+
 	t.Run("everything missing: zero ActivityAt", func(t *testing.T) {
+		// Guarded so this cannot pass standalone under a -run filter with proj
+		// already empty, proving nothing (task-1 review, Important 1, point 4).
+		entries, err := os.ReadDir(proj)
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("scenario not built: %s has nothing to remove (entries=%d, err=%v) — this subtest depends on prior ones", proj, len(entries), err)
+		}
 		os.RemoveAll(proj)
-		views, _ := Collect(reg, home)
+		views, err := Collect(reg, home)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
 		if !views[0].ActivityAt.IsZero() || views[0].HasPreview {
 			t.Errorf("missing-everything: ActivityAt=%v HasPreview=%v", views[0].ActivityAt, views[0].HasPreview)
 		}

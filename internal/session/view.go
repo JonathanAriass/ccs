@@ -103,6 +103,13 @@ func Collect(registryDir, home string) ([]View, error) {
 		// any current test can catch its removal.
 		p := transcript.Path(home, s.CWD, s.SessionID)
 		live := transcript.LiveSource(p)
+		// ActivityAt follows the live source unconditionally, even when the reads
+		// below fail or the live subagent turns out to have nothing sayable — a
+		// just-spawned subagent IS activity even before it has produced text. So
+		// ActivityAt and LastAssistant/LiveAgent can legitimately disagree: a
+		// fresh ActivityAt next to a stale main-thread reply and no label. Task 2
+		// renders these fields side by side and needs to know that's by design,
+		// not a bug.
 		v.ActivityAt = live.Mod
 		if sum, err := transcript.Read(p); err == nil {
 			v.Title = sum.AITitle
@@ -115,6 +122,11 @@ func Collect(registryDir, home string) ([]View, error) {
 		// half follows the live source. A failed or empty subagent read falls
 		// back to the main summary WITH the label cleared — a label claiming
 		// text came from an agent when it did not is worse than no label.
+		//
+		// COVERAGE NOTE: `err == nil` here is unpinnable by any fixture, same as
+		// its neighbour above — Read returns (Summary{}, err) on failure, so
+		// `sub.LastAssistant != ""` already subsumes it. Kept for the same reason:
+		// an explicit contract, not a behaviour any current test can catch losing.
 		if live.Agent != "" {
 			if sub, err := transcript.Read(live.Path); err == nil && sub.LastAssistant != "" {
 				v.LiveAgent = live.Agent

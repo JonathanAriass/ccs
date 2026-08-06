@@ -71,7 +71,7 @@ func LiveSource(mainPath string) Source {
 	if st, err := os.Stat(mainPath); err == nil {
 		best = Source{Path: mainPath, Mod: st.ModTime()}
 	}
-	subDir := strings.TrimSuffix(mainPath, ".jsonl") + "/subagents"
+	subDir := filepath.Join(strings.TrimSuffix(mainPath, ".jsonl"), "subagents")
 	filepath.WalkDir(subDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(p) != ".jsonl" {
 			return nil // an unreadable subtree degrades to "main is live"
@@ -89,8 +89,10 @@ func LiveSource(mainPath string) Source {
 }
 
 // agentNamePat matches teammate transcript filenames: "agent-a<name>-<16 hex>".
-// Workflow agents are bare "agent-<hex>" with no embedded name and fall back to
-// the generic label. Display-only — no behaviour keys off the parsed name.
+// Unnamed (workflow) agents are "agent-a<16 hex>" with no name and no trailing
+// "-<hex>" — the pattern's required "-[0-9a-f]{16}$" tail has nothing left to
+// match, so they fall back to the generic label. Display-only — no behaviour
+// keys off the parsed name.
 var agentNamePat = regexp.MustCompile(`^agent-a(.+)-[0-9a-f]{16}$`)
 
 func agentDisplayName(base string) string {
