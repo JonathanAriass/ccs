@@ -111,7 +111,11 @@ func (m *Model) syncPreview() {
 		if v.LiveAgent != "" {
 			// The live text is a subagent's, not the main thread's — say so, or
 			// a stale main answer and a live agent answer are indistinguishable.
-			asstLabel = "Last assistant (⚙ " + v.LiveAgent + "):"
+			// LiveAgent is transcript-PATH-derived (filepath.Base of a subagent
+			// file), not transcript CONTENT — but a macOS filename can carry any
+			// byte but "/" and NUL, so it goes through sanitize() same as every
+			// other transcript-derived string in the frame.
+			asstLabel = "Last assistant (⚙ " + sanitize(v.LiveAgent) + "):"
 		}
 		body.WriteString("\n\n" + labelStyle.Render(asstLabel) + "\n")
 		body.WriteString(wrapToWidth(sanitize(v.LastAssistant), inner))

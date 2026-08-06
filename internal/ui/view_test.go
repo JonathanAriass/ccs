@@ -93,15 +93,25 @@ func controlChars(s string) []string {
 }
 
 // Every transcript-derived field (name via ai-title, directory, last human,
-// last assistant) is attacker/accident-controlled content. This is the
-// integration half of the sanitize guarantee: sanitize() itself is unit
-// tested in sanitize_test.go, but nothing there proves View() actually calls
-// it on every field. NOTE: this fixture's long CWD gets truncated by
-// elideMiddle, and lipgloss's own pane-width truncation happens to strip some
-// of what survives — so on its own this test does NOT reliably pin the CWD
-// sanitize call; see TestViewSanitizesShortCWD, which uses an untruncated CWD
-// specifically to close that gap. This test still pins name, the row's
-// last-message column, and both preview fields.
+// last assistant, and — since Task 2 — the live subagent's name) is
+// attacker/accident-controlled content. This is the integration half of the
+// sanitize guarantee: sanitize() itself is unit tested in sanitize_test.go,
+// but nothing there proves View() actually calls it on every field. NOTE:
+// this fixture's long CWD gets truncated by elideMiddle, and lipgloss's own
+// pane-width truncation happens to strip some of what survives — so on its
+// own this test does NOT reliably pin the CWD sanitize call; see
+// TestViewSanitizesShortCWD, which uses an untruncated CWD specifically to
+// close that gap. This test still pins name, the row's last-message column,
+// and all three preview fields (human, assistant, and the assistant's ⚙
+// source label).
+//
+// LiveAgent is transcript-PATH-derived, not transcript CONTENT — it comes
+// from filepath.Base of a subagent's filename, not anything a message body
+// carries — but a macOS filename may contain any byte but "/" and NUL, so a
+// hostile or malformed one reaches the frame exactly the same way a hostile
+// message would. "ev\x1b[2Jil\ragent\x07" is a real value agentDisplayName
+// can hand back for such a filename (verified against transcript.go's
+// parsing), not a hypothetical string.
 func TestViewSanitizesAllTranscriptDerivedFields(t *testing.T) {
 	m := sizedModel(1, 100, 30)
 	m.views[0] = session.View{
@@ -114,6 +124,7 @@ func TestViewSanitizesAllTranscriptDerivedFields(t *testing.T) {
 		TTY:           "ttys001",
 		LastHuman:     "hi\x1b[2Jthere\r",
 		LastAssistant: "ok\tgot\x07it\r",
+		LiveAgent:     "ev\x1b[2Jil\ragent\x07",
 		HasPreview:    true,
 	}
 	// The preview body (LastHuman/LastAssistant) only reaches the frame via

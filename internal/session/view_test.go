@@ -360,6 +360,10 @@ func TestCollectFollowsTheLiveSource(t *testing.T) {
 		// the same age as the tie subtest below and passed only because .After
 		// is strict and best seeds from main, not because main was newer.)
 		mk("sess-1.jsonl", mainRec, 10*time.Second)
+		mainSt, err := os.Stat(filepath.Join(proj, "sess-1.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		views, err := Collect(reg, home)
 		if err != nil || len(views) != 1 {
 			t.Fatalf("collect: %v (%d views)", err, len(views))
@@ -367,6 +371,15 @@ func TestCollectFollowsTheLiveSource(t *testing.T) {
 		v := views[0]
 		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
 			t.Errorf("main-newest: LastAssistant=%q LiveAgent=%q", v.LastAssistant, v.LiveAgent)
+		}
+		// ActivityAt must follow the live source in THIS direction too — main is
+		// the live source here, so it must be main's mtime, not left at zero or
+		// stuck on the subagent's. Task-2 review, Important 2: a mutation that
+		// only assigns ActivityAt inside the `live.Agent != ""` branch survived
+		// the whole suite because no test asserted this direction at all — 10 of
+		// 14 real sessions are main-live, so that gap covered the majority state.
+		if !v.ActivityAt.Equal(mainSt.ModTime()) {
+			t.Errorf("ActivityAt = %v, want main's mtime %v — must follow the live source (main here), not just the subagent", v.ActivityAt, mainSt.ModTime())
 		}
 	})
 
