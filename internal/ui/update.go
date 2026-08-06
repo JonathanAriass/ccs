@@ -98,12 +98,22 @@ func (m *Model) syncPreview() {
 	case v == nil:
 		m.preview.SetContent("")
 	case !v.HasPreview:
-		m.preview.SetContent("  no preview")
+		if v.ActivityAt.IsZero() {
+			m.preview.SetContent("  no preview (transcript missing)")
+		} else {
+			m.preview.SetContent("  no preview")
+		}
 	default:
 		var body strings.Builder
 		body.WriteString(labelStyle.Render("Last human:") + "\n")
 		body.WriteString(wrapToWidth(sanitize(v.LastHuman), inner))
-		body.WriteString("\n\n" + labelStyle.Render("Last assistant:") + "\n")
+		asstLabel := "Last assistant:"
+		if v.LiveAgent != "" {
+			// The live text is a subagent's, not the main thread's — say so, or
+			// a stale main answer and a live agent answer are indistinguishable.
+			asstLabel = "Last assistant (⚙ " + v.LiveAgent + "):"
+		}
+		body.WriteString("\n\n" + labelStyle.Render(asstLabel) + "\n")
 		body.WriteString(wrapToWidth(sanitize(v.LastAssistant), inner))
 		m.preview.SetContent(body.String())
 	}

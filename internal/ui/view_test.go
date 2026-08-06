@@ -47,15 +47,25 @@ func visibleText(s string) string { return ansi.Strip(s) }
 // frame. A whole-frame substring search for e.g. "1/" would also match a CWD
 // like "/tmp/v1/x" for the wrong reason — extracting the actual title line
 // is what makes an assertion against it real evidence.
+//
+// The `now` handed to renderPreviewMetadata is fixed rather than time.Now():
+// every caller of this helper asserts on the title's SHAPE, never on the
+// Activity line's age text, so a fixed instant keeps the fixture
+// deterministic without claiming the value matters.
 func titleOf(m Model) string {
 	v := m.selected()
 	if v == nil {
 		return ""
 	}
 	_, previewW := paneWidths(m.width)
-	line, _, _ := strings.Cut(m.renderPreviewMetadata(v, paneInnerWidth(previewW)), "\n")
+	line, _, _ := strings.Cut(m.renderPreviewMetadata(v, paneInnerWidth(previewW), fixedNow), "\n")
 	return visibleText(line)
 }
+
+// fixedNow is the `now` every structural (non-age-asserting) renderPreviewMetadata
+// test call passes, so those fixtures are deterministic without implying the
+// instant itself is meaningful.
+var fixedNow = time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
 
 // controlChars lists the C0 control characters and DELs left in s.
 //
@@ -172,6 +182,25 @@ func TestViewNoPreviewWhenHasPreviewFalse(t *testing.T) {
 	out := visibleText(m.View())
 	if !strings.Contains(out, "no preview") {
 		t.Errorf("expected \"no preview\" in the frame, got:\n%s", out)
+	}
+}
+
+// The missing-transcript reason: HasPreview false + zero ActivityAt means
+// nothing exists on disk (Claude Code's ~30-day cleanup purges transcripts
+// under live processes). Both directions: reason shown only in that state.
+func TestNoPreviewSaysWhyWhenTranscriptIsMissing(t *testing.T) {
+	m := sizedModel(1, 100, 30)
+	m.views[0] = session.View{Session: session.Session{SessionID: "s0", Status: "idle"}}
+	m.views[0].ActivityAt = time.Time{}
+	m.syncPreview()
+	if !strings.Contains(visibleText(m.View()), "no preview (transcript missing)") {
+		t.Error("purged transcript must say so")
+	}
+	m.views[0].ActivityAt = time.Now()
+	m.syncPreview()
+	out := visibleText(m.View())
+	if strings.Contains(out, "transcript missing") || !strings.Contains(out, "no preview") {
+		t.Error("a session with a transcript but no exchange keeps the plain 'no preview'")
 	}
 }
 
@@ -822,7 +851,7 @@ func TestPreviewTitleKeepsBothAffordancesAtEveryWidth(t *testing.T) {
 				}
 				// The whole block must stay exactly previewMetadataLines rows,
 				// which requires the title to be exactly one of them.
-				block := m.renderPreviewMetadata(m.selected(), innerW)
+				block := m.renderPreviewMetadata(m.selected(), innerW, fixedNow)
 				if got := strings.Count(block, "\n") + 1; got != previewMetadataLines {
 					t.Fatalf("%s: metadata block is %d lines, want previewMetadataLines = %d:\n%s",
 						where, got, previewMetadataLines, visibleText(block))
@@ -1015,11 +1044,13 @@ func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
 // this project's recurring shape — a guard whose only test constrains one
 // direction — so this test pins the other one.
 func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
+	now := fixedNow
 	v := session.View{
-		Session: session.Session{SessionID: "s0", Status: "waiting", Version: "2.1.220"},
-		TTY:     "ttys017-nested-inner",
-		Tokens:  123456789,
-		Cost:    12345.678,
+		Session:    session.Session{SessionID: "s0", Status: "waiting", Version: "2.1.220"},
+		TTY:        "ttys017-nested-inner",
+		Tokens:     123456789,
+		Cost:       12345.678,
+		ActivityAt: now.Add(-3 * time.Hour),
 	}
 	// EVERY line renderPreviewMetadata puts through `fit`, with the content it
 	// would carry if nothing clamped it.
@@ -1033,6 +1064,7 @@ func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
 		previewField("Status", v.Status),
 		previewField("Version", v.Version),
 		previewField("TTY", v.TTY),
+		previewField("Activity", compactAge(v.ActivityAt, now)),
 		labelStyle.Render("main thread"),
 		previewField("Tokens", fmt.Sprintf("%d", v.Tokens)),
 		previewField("Cost", fmt.Sprintf("$%.2f", v.Cost)),
@@ -1041,7 +1073,7 @@ func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
 	for innerW := 1; innerW <= 60; innerW++ {
 		m := New()
 		m.views = []session.View{v}
-		rendered := m.renderPreviewMetadata(&m.views[0], innerW)
+		rendered := m.renderPreviewMetadata(&m.views[0], innerW, now)
 
 		for _, line := range strings.Split(rendered, "\n") {
 			if got := ansi.StringWidth(line); got > innerW {
@@ -1099,8 +1131,8 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 		want   bool
 	}{
 		{20, true},  // two-pane: Tab switches
-		{14, true},  // the threshold itself
-		{13, false}, // one row below it: list-only, Tab is a no-op
+		{15, true},  // the threshold itself (moved from 14 — see previewFits)
+		{14, false}, // one row below it: list-only, Tab is a no-op
 		{minTermHeight, false},
 	} {
 		m := heightSweepModel(liveSessionCount, 100, c.height)
@@ -1622,18 +1654,25 @@ func TestListTitleIsExactlyOneLine(t *testing.T) {
 	}
 }
 
-// TestPreviewPaneRendersAtHeight14ButNotHeight13 pins previewFits' threshold
+// TestPreviewPaneRendersAtHeight15ButNotHeight14 pins previewFits' threshold
 // end to end through the real View() path, in BOTH directions — the
-// companion to layout_test.go's TestPreviewFitsThresholdIsExactlyHeight14,
+// companion to layout_test.go's TestPreviewFitsThresholdIsExactlyHeight15,
 // which pins the same boundary at the pure-function level. Pinning only one
 // side leaves the other free to drift.
-func TestPreviewPaneRendersAtHeight14ButNotHeight13(t *testing.T) {
+//
+// The boundary is 15/14, not 14/13: the Activity line grew
+// previewMetadataLines from 9 to 10, and previewFits reads that constant
+// directly, so the pane now needs one more row of terminal height to clear
+// the same paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
+// threshold — paneInnerHeight(bodyPaneHeight(15)) = 11 = previewMetadataLines
+// (10) + 1.
+func TestPreviewPaneRendersAtHeight15ButNotHeight14(t *testing.T) {
 	cases := []struct {
 		height    int
 		wantPanes int
 	}{
-		{14, 2}, // the boundary itself: the preview pane IS rendered
-		{13, 1}, // one row shorter: list-only
+		{15, 2}, // the boundary itself: the preview pane IS rendered
+		{14, 1}, // one row shorter: list-only
 	}
 	for _, c := range cases {
 		m := heightSweepModel(liveSessionCount, 100, c.height)

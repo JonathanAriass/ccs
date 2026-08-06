@@ -396,7 +396,7 @@ func homeAbbrev(path, home string) string {
 //
 // previewMetadataLines is defined in view.go, not here — this stays a pure
 // function of termH so it can be pinned directly
-// (TestPreviewFitsThresholdIsExactlyHeight14) without building a styled frame.
+// (TestPreviewFitsThresholdIsExactlyHeight15) without building a styled frame.
 func previewFits(termH int) bool {
 	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
 }

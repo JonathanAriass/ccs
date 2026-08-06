@@ -289,27 +289,32 @@ func TestPreviewBodyHeight(t *testing.T) {
 	}
 }
 
-// TestPreviewFitsThresholdIsExactlyHeight14 pins previewFits' boundary in
+// TestPreviewFitsThresholdIsExactlyHeight15 pins previewFits' boundary in
 // BOTH directions, at the pure-function level, independent of any rendering.
-// Pinning only one side (e.g. "13 must not fit") leaves the other free to
-// drift — a mutant that changed ">=" to ">" would still fail 13 but wrongly
-// pass 14 through as well, and this table catches that.
+// Pinning only one side (e.g. "14 must not fit") leaves the other free to
+// drift — a mutant that changed ">=" to ">" would still fail 14 but wrongly
+// pass 15 through as well, and this table catches that.
 //
-// The exact numbers: bodyPaneHeight(14) = 12, paneInnerHeight(12) = 10, and
-// previewMetadataLines (9) + 1 = 10 — so 14 lands EXACTLY on the boundary,
+// The exact numbers: bodyPaneHeight(15) = 13, paneInnerHeight(13) = 11, and
+// previewMetadataLines (10) + 1 = 11 — so 15 lands EXACTLY on the boundary,
 // not comfortably inside it. That is deliberate coverage, not an arbitrary
-// choice of fixture: it is the value view.go's own TestPreviewPaneRendersAtHeight14ButNotHeight13
+// choice of fixture: it is the value view.go's own TestPreviewPaneRendersAtHeight15ButNotHeight14
 // exercises end to end, so this test and that one must agree.
-func TestPreviewFitsThresholdIsExactlyHeight14(t *testing.T) {
+//
+// The boundary moved here from 14 to 15 when the preview's pinned metadata
+// block grew by one line (the Activity line, previewMetadataLines 9 → 10):
+// previewFits reads previewMetadataLines directly, so the extra line raises
+// the interior room the pane needs by one row too.
+func TestPreviewFitsThresholdIsExactlyHeight15(t *testing.T) {
 	cases := []struct {
 		termH int
 		want  bool
 	}{
 		{8, false},
 		{10, false},
-		{13, false}, // one below the boundary
-		{14, true},  // the boundary itself
-		{15, true},
+		{14, false}, // one below the boundary
+		{15, true},  // the boundary itself
+		{16, true},
 		{30, true},
 	}
 	for _, c := range cases {

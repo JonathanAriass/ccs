@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
 	tea "github.com/charmbracelet/bubbletea"
@@ -429,6 +430,17 @@ func previewAssistantMarker(i int) string { return fmt.Sprintf("ASSISTANT-%d-MAR
 //
 // Every session's exchange is DISTINCT (see previewHumanMarker) and long enough
 // to overflow the pane; several tests depend on both properties.
+//
+// LastHuman is deliberately SHORT (a handful of words) while LastAssistant
+// carries the 400-repeat body that does the overflowing: at this fixture's
+// dimensions a 400-repeat LastHuman alone runs to ~46 wrapped lines, which
+// pushes the "Last assistant" label (and everything after it) well past the
+// 16-row viewport at YOffset 0 — invisible without scrolling. Every existing
+// scroll/overflow test only ever needs SOME content past the viewport height,
+// which the long assistant body still supplies on its own; a short human
+// half additionally lets TestPreviewShowsActivityAgeAndSourceLabel assert the
+// assistant label's presence without having to scroll to find it first,
+// matching how a reader actually encounters it (at the top, unscrolled).
 func modelWithOverflowingPreview(t *testing.T, n int) Model {
 	t.Helper()
 	views := make([]session.View, n)
@@ -436,7 +448,7 @@ func modelWithOverflowingPreview(t *testing.T, n int) Model {
 		views[i] = session.View{
 			Session:       session.Session{SessionID: fmt.Sprintf("s%d", i)},
 			HasPreview:    true,
-			LastHuman:     previewHumanMarker(i) + " " + strings.Repeat("word ", 400),
+			LastHuman:     previewHumanMarker(i) + " " + strings.Repeat("word ", 3),
 			LastAssistant: previewAssistantMarker(i) + " " + strings.Repeat("reply ", 400),
 		}
 	}
@@ -947,7 +959,7 @@ func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
 	// the only link between the rendered block and the number.
 	m := modelWithOverflowingPreview(t, 1)
 	_, previewW := paneWidths(m.width)
-	got := strings.Count(m.renderPreviewMetadata(m.selected(), paneInnerWidth(previewW)), "\n") + 1
+	got := strings.Count(m.renderPreviewMetadata(m.selected(), paneInnerWidth(previewW), fixedNow), "\n") + 1
 	if got != previewMetadataLines {
 		t.Errorf("metadata renders %d lines, previewMetadataLines = %d", got, previewMetadataLines)
 	}
@@ -1017,7 +1029,7 @@ func shrunkBelowThePreviewThreshold(t *testing.T, cursor int) Model {
 	m.cursor = cursor
 	m.focus = focusPreview
 
-	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13}) // one below the threshold
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13}) // below the threshold (15)
 	m = next.(Model)
 	if m.previewVisible() {
 		t.Fatal("fixture: preview must NOT be visible at height 13 — see previewFits")
@@ -1112,6 +1124,39 @@ func TestJAndKDoNotScrollAnInvisiblePreview(t *testing.T) {
 // TestTabIsNoOpWhenPreviewNotVisible pins the other half of "focus must not
 // point at a pane that isn't drawn": with no second pane to switch TO, Tab
 // must not toggle m.focus (and must not schedule a command).
+// TestPreviewShowsActivityAgeAndSourceLabel pins the two new affordances in
+// both directions each: age line present and derived from ActivityAt; label
+// present exactly when a subagent is live.
+func TestPreviewShowsActivityAgeAndSourceLabel(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.views[0].ActivityAt = time.Now().Add(-44 * time.Minute)
+	m.views[0].LiveAgent = ""
+	m.syncPreview()
+	frame := visibleText(m.View())
+	if !strings.Contains(frame, "Activity: 44m") {
+		t.Errorf("no age line for a 44m-old source:\n%s", frame)
+	}
+	if strings.Contains(frame, "⚙") {
+		t.Errorf("source label shown while the MAIN thread is live")
+	}
+
+	m.views[0].LiveAgent = "impl-fix2"
+	m.syncPreview()
+	frame = visibleText(m.View())
+	if !strings.Contains(frame, "Last assistant (⚙ impl-fix2):") {
+		t.Errorf("assistant half not labeled with the live agent:\n%s", frame)
+	}
+}
+
+func TestPreviewAgeDashWhenNothingOnDisk(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.views[0].ActivityAt = time.Time{}
+	m.syncPreview()
+	if !strings.Contains(visibleText(m.View()), "Activity: -") {
+		t.Error("zero ActivityAt must render as '-' like the TTY field does")
+	}
+}
+
 func TestTabIsNoOpWhenPreviewNotVisible(t *testing.T) {
 	m := modelWithOverflowingPreview(t, 3)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13})

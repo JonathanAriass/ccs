@@ -247,6 +247,7 @@ func (m Model) View() string {
 	}
 
 	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
+	now := time.Now()                 // shared by every clock-relative field this frame draws
 
 	var body string
 	if !m.previewVisible() {
@@ -288,7 +289,7 @@ func (m Model) View() string {
 		} else {
 			list = m.renderList(listW, paneH, lp)
 		}
-		preview := m.renderPreview(previewW, paneH, pp)
+		preview := m.renderPreview(previewW, paneH, pp, now)
 		body = lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
 	}
 
@@ -382,7 +383,7 @@ func (m Model) renderList(width, height int, pane lipgloss.Style) string {
 // if that test reports a different number, change this constant to match the
 // test's number and say so in your report. Do not adjust the test to match the
 // constant; the rendered output is the authority.
-const previewMetadataLines = 9
+const previewMetadataLines = 10
 
 // renderPreviewMetadata is the pinned part of the preview: everything above the
 // scrolling exchange, ending with the blank separator line.
@@ -405,7 +406,7 @@ const previewMetadataLines = 9
 // entire bottom border, and the scrolling preview made it permanent by padding
 // the viewport to its full Height regardless of content, removing the vertical
 // slack that used to absorb the extra line.
-func (m Model) renderPreviewMetadata(v *session.View, innerW int) string {
+func (m Model) renderPreviewMetadata(v *session.View, innerW int, now time.Time) string {
 	// fit clamps one line to the pane's interior. innerW <= 0 means there is no
 	// interior at all, so nothing can be drawn in it.
 	fit := func(s string) string {
@@ -430,6 +431,11 @@ func (m Model) renderPreviewMetadata(v *session.View, innerW int) string {
 		tty = "-"
 	}
 	b.WriteString("\n" + fit(previewField("TTY", tty)))
+	age := "-"
+	if !v.ActivityAt.IsZero() {
+		age = compactAge(v.ActivityAt, now)
+	}
+	b.WriteString("\n" + fit(previewField("Activity", age)))
 	b.WriteString("\n\n" + fit(labelStyle.Render("main thread")))
 	b.WriteString("\n" + fit(previewField("Tokens", fmt.Sprintf("%d", v.Tokens))))
 	b.WriteString("\n" + fit(previewField("Cost", fmt.Sprintf("$%.2f", v.Cost))))
@@ -437,13 +443,13 @@ func (m Model) renderPreviewMetadata(v *session.View, innerW int) string {
 	return b.String()
 }
 
-func (m Model) renderPreview(width, height int, pane lipgloss.Style) string {
+func (m Model) renderPreview(width, height int, pane lipgloss.Style, now time.Time) string {
 	var b strings.Builder
 	if v := m.selected(); v == nil {
 		b.WriteString(titleStyle.Render("Preview"))
 		b.WriteString("\n  (no session selected)")
 	} else {
-		b.WriteString(m.renderPreviewMetadata(v, paneInnerWidth(width)))
+		b.WriteString(m.renderPreviewMetadata(v, paneInnerWidth(width), now))
 		// Sizing and content come from syncPreview in Update. Writing them here
 		// would be discarded — View has a value receiver.
 		b.WriteString("\n" + m.preview.View())
