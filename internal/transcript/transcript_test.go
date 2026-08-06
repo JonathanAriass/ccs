@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSlug(t *testing.T) {
@@ -178,4 +179,78 @@ func TestTailLines(t *testing.T) {
 			t.Fatalf("want 10, got %d", len(lines))
 		}
 	})
+}
+
+// buildSessionTree writes a fake session layout under dir and returns the main
+// transcript path. mtimes are set explicitly — mtime ordering is the entire
+// behaviour under test, so no fixture may rely on write order.
+func buildSessionTree(t *testing.T, dir string, mainAge, teammateAge, workflowAge time.Duration) string {
+	t.Helper()
+	now := time.Now()
+	mk := func(rel, content string, age time.Duration) string {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, now.Add(-age), now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	main := mk("sess-1.jsonl", `{"type":"assistant","message":{"content":[{"type":"text","text":"MAIN-TEXT"}]}}`+"\n", mainAge)
+	mk("sess-1/subagents/agent-aimpl-fix2-0123456789abcdef.jsonl",
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"TEAMMATE-TEXT"}]}}`+"\n", teammateAge)
+	mk("sess-1/subagents/workflows/wf_x-1/agent-0123456789abcdef0.jsonl",
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"WORKFLOW-TEXT"}]}}`+"\n", workflowAge)
+	return main
+}
+
+func TestLiveSourcePicksNewestAcrossMainAndSubagents(t *testing.T) {
+	cases := []struct {
+		name                  string
+		mainAge, tmAge, wfAge time.Duration
+		wantAgent             string // "" = main
+	}{
+		// Both directions, per the house rule: main newest AND subagent newest.
+		{"main newest", time.Minute, time.Hour, time.Hour, ""},
+		{"teammate newest", time.Hour, time.Minute, 2 * time.Hour, "impl-fix2"},
+		{"workflow agent newest (bare hex name falls back)", time.Hour, 2 * time.Hour, time.Minute, "agent"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			main := buildSessionTree(t, t.TempDir(), c.mainAge, c.tmAge, c.wfAge)
+			src := LiveSource(main)
+			if src.Agent != c.wantAgent {
+				t.Fatalf("Agent = %q, want %q (picked %s)", src.Agent, c.wantAgent, src.Path)
+			}
+			if src.Mod.IsZero() {
+				t.Fatal("Mod is zero for an existing source")
+			}
+			if c.wantAgent == "" && src.Path != main {
+				t.Errorf("main newest but Path = %s", src.Path)
+			}
+		})
+	}
+}
+
+func TestLiveSourceWithNoFilesAtAll(t *testing.T) {
+	src := LiveSource(filepath.Join(t.TempDir(), "absent.jsonl"))
+	if !src.Mod.IsZero() || src.Agent != "" {
+		t.Fatalf("want zero Source for nothing on disk, got %+v", src)
+	}
+}
+
+func TestLiveSourceMainMissingButSubagentsExist(t *testing.T) {
+	dir := t.TempDir()
+	main := buildSessionTree(t, dir, time.Minute, time.Hour, time.Hour)
+	if err := os.Remove(main); err != nil {
+		t.Fatal(err)
+	}
+	src := LiveSource(main)
+	if src.Agent != "impl-fix2" {
+		t.Fatalf("want the teammate as live source when main is purged, got %+v", src)
+	}
 }

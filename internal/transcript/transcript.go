@@ -7,9 +7,12 @@ package transcript
 
 import (
 	"bufio"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -45,6 +48,57 @@ func Slug(cwd string) string {
 // its real transcript lives under only one.
 func Path(home, cwd, sessionID string) string {
 	return filepath.Join(home, ".claude", "projects", Slug(cwd), sessionID+".jsonl")
+}
+
+// Source identifies the transcript that most recently changed for a session:
+// the main conversation file, or one of its subagent transcripts.
+type Source struct {
+	Path  string
+	Mod   time.Time
+	Agent string // "" = the main transcript is the live one
+}
+
+// LiveSource returns the newest-mtime transcript among mainPath and every
+// .jsonl under the session's subagents tree (<mainPath minus .jsonl>/subagents,
+// recursively — teammates sit directly there, workflow agents one level deeper).
+//
+// The walk reads MTIMES ONLY — no file contents. That is the performance
+// contract that lets Collect call this on the 2-second poll for every session:
+// measured worst case on the dev machine, 126 subagent transcripts in 12.5ms
+// cold. A zero Mod means no source exists at all.
+func LiveSource(mainPath string) Source {
+	var best Source
+	if st, err := os.Stat(mainPath); err == nil {
+		best = Source{Path: mainPath, Mod: st.ModTime()}
+	}
+	subDir := strings.TrimSuffix(mainPath, ".jsonl") + "/subagents"
+	filepath.WalkDir(subDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(p) != ".jsonl" {
+			return nil // an unreadable subtree degrades to "main is live"
+		}
+		in, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		if in.ModTime().After(best.Mod) {
+			best = Source{Path: p, Mod: in.ModTime(), Agent: agentDisplayName(filepath.Base(p))}
+		}
+		return nil
+	})
+	return best
+}
+
+// agentNamePat matches teammate transcript filenames: "agent-a<name>-<16 hex>".
+// Workflow agents are bare "agent-<hex>" with no embedded name and fall back to
+// the generic label. Display-only — no behaviour keys off the parsed name.
+var agentNamePat = regexp.MustCompile(`^agent-a(.+)-[0-9a-f]{16}$`)
+
+func agentDisplayName(base string) string {
+	stem := strings.TrimSuffix(base, ".jsonl")
+	if m := agentNamePat.FindStringSubmatch(stem); m != nil {
+		return m[1]
+	}
+	return "agent"
 }
 
 // tailLines returns up to maxRecords trailing lines, reading at most maxBytes

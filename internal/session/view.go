@@ -20,6 +20,8 @@ type View struct {
 	Tokens        int64
 	Cost          float64
 	HasPreview    bool
+	ActivityAt    time.Time // mtime of the live source (main or subagent); zero = nothing on disk
+	LiveAgent     string    // subagent display name when a subagent is the live source; "" = main
 }
 
 // DisplayName resolves the label for the name column.
@@ -100,11 +102,25 @@ func Collect(registryDir, home string) ([]View, error) {
 		// return partial data on error silently leak into a View), not because
 		// any current test can catch its removal.
 		p := transcript.Path(home, s.CWD, s.SessionID)
+		live := transcript.LiveSource(p)
+		v.ActivityAt = live.Mod
 		if sum, err := transcript.Read(p); err == nil {
 			v.Title = sum.AITitle
 			v.LastHuman = sum.LastHuman
 			v.LastAssistant = sum.LastAssistant
 			v.HasPreview = sum.LastHuman != "" || sum.LastAssistant != ""
+		}
+		// Mixed sources, per the spec: the human half stays main-thread (a
+		// subagent transcript contains no human-typed records), the assistant
+		// half follows the live source. A failed or empty subagent read falls
+		// back to the main summary WITH the label cleared — a label claiming
+		// text came from an agent when it did not is worse than no label.
+		if live.Agent != "" {
+			if sub, err := transcript.Read(live.Path); err == nil && sub.LastAssistant != "" {
+				v.LiveAgent = live.Agent
+				v.LastAssistant = sub.LastAssistant
+				v.HasPreview = true
+			}
 		}
 		// DELIBERATELY NOT computing cost here. The FIRST cost lookup for a path is
 		// a FULL scan — measured at 508ms and 160MB of peak heap on the real 88MB

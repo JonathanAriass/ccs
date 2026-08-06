@@ -296,6 +296,85 @@ func TestCollectPreview(t *testing.T) {
 	})
 }
 
+// Distinct content per source — identical fixture content once made an entire
+// call site unassertable (recorded in the house testing rules).
+func TestCollectFollowsTheLiveSource(t *testing.T) {
+	home := t.TempDir()
+	// registry: one live session. The file's existing helper is
+	//   registryWithSession(t, pid, procStart, cwd, sessionID string) string
+	// (view_test.go:113 — it returns the registry dir). Use this process's own
+	// pid + procStartString(os.Getpid()) so IsLive accepts it; the file's
+	// liveness tests at :139-151 show that exact pattern.
+	self := os.Getpid()
+	start, err := procStartString(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := registryWithSession(t, self, start, "/tmp/proj", "sess-1")
+
+	proj := filepath.Join(home, ".claude", "projects", transcript.Slug("/tmp/proj"))
+	now := time.Now()
+	mk := func(rel, content string, age time.Duration) {
+		p := filepath.Join(proj, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(content), 0o644)
+		os.Chtimes(p, now.Add(-age), now.Add(-age))
+	}
+	mainRec := `{"type":"user","origin":{"kind":"human"},"message":{"content":[{"type":"text","text":"HUMAN-PROMPT"}]}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"MAIN-ANSWER"}]}}` + "\n"
+
+	t.Run("subagent newer: mixed halves", func(t *testing.T) {
+		mk("sess-1.jsonl", mainRec, time.Hour)
+		mk("sess-1/subagents/agent-aworker-1-00112233445566aa.jsonl",
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"SUB-LIVE"}]}}`+"\n", time.Minute)
+		views, err := Collect(reg, home)
+		if err != nil || len(views) != 1 {
+			t.Fatalf("collect: %v (%d views)", err, len(views))
+		}
+		v := views[0]
+		if v.LastHuman != "HUMAN-PROMPT" {
+			t.Errorf("LastHuman = %q — must stay MAIN-thread", v.LastHuman)
+		}
+		if v.LastAssistant != "SUB-LIVE" {
+			t.Errorf("LastAssistant = %q — must come from the live subagent", v.LastAssistant)
+		}
+		if v.LiveAgent != "worker-1" {
+			t.Errorf("LiveAgent = %q", v.LiveAgent)
+		}
+		if time.Since(v.ActivityAt) > 10*time.Minute {
+			t.Errorf("ActivityAt = %v — must be the SUBAGENT's mtime, not main's", v.ActivityAt)
+		}
+	})
+
+	t.Run("main newer: pure main, no label", func(t *testing.T) {
+		mk("sess-1.jsonl", mainRec, time.Minute)
+		// subagent file from the previous subtest is now OLDER
+		views, _ := Collect(reg, home)
+		v := views[0]
+		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
+			t.Errorf("main-newest: LastAssistant=%q LiveAgent=%q", v.LastAssistant, v.LiveAgent)
+		}
+	})
+
+	t.Run("live subagent unreadable: falls back to main, label cleared", func(t *testing.T) {
+		mk("sess-1.jsonl", mainRec, time.Hour)
+		mk("sess-1/subagents/agent-aworker-1-00112233445566aa.jsonl", "", time.Minute) // empty file: Read yields nothing
+		views, _ := Collect(reg, home)
+		v := views[0]
+		if v.LastAssistant != "MAIN-ANSWER" || v.LiveAgent != "" {
+			t.Errorf("fallback: LastAssistant=%q LiveAgent=%q — a lying label is worse than no label", v.LastAssistant, v.LiveAgent)
+		}
+	})
+
+	t.Run("everything missing: zero ActivityAt", func(t *testing.T) {
+		os.RemoveAll(proj)
+		views, _ := Collect(reg, home)
+		if !views[0].ActivityAt.IsZero() || views[0].HasPreview {
+			t.Errorf("missing-everything: ActivityAt=%v HasPreview=%v", views[0].ActivityAt, views[0].HasPreview)
+		}
+	})
+}
+
 func TestCostForMissingFile(t *testing.T) {
 	home := t.TempDir()
 	v := View{Session: Session{CWD: "/tmp/nope", SessionID: "gone"}}
