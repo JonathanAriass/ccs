@@ -193,6 +193,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// MUST be first: q is a bound key (Quit) outside this mode, and while
+	// renaming it has to reach the input field instead of quitting ccs.
+	if m.renaming {
+		switch msg.Type {
+		case tea.KeyEsc:
+			m.renaming = false
+			m.nameInput.Blur()
+			return m, nil
+		case tea.KeyEnter:
+			m.renaming = false
+			m.nameInput.Blur()
+			name := strings.TrimSpace(flattenToRow(sanitize(m.nameInput.Value())))
+			if name == "" {
+				delete(m.names, m.renameFor)
+			} else {
+				m.names[m.renameFor] = name
+			}
+			if err := saveNames(m.namesFile, m.names); err != nil {
+				m.status = "rename won't persist: " + err.Error()
+			}
+			return m, nil // Task 2 replaces nil with the title-push cmd
+		}
+		var cmd tea.Cmd
+		m.nameInput, cmd = m.nameInput.Update(msg)
+		return m, cmd
+	}
+
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
@@ -276,6 +303,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.status = ""
+		return m, nil
+
+	case key.Matches(msg, m.keys.Rename):
+		v := m.selected()
+		if v == nil {
+			return m, nil
+		}
+		m.renaming = true
+		m.renameFor = v.SessionID
+		m.nameInput.SetValue(m.names[v.SessionID]) // prefill the OVERRIDE, not the auto-name: Enter-on-empty clears
+		m.nameInput.Focus()
 		return m, nil
 	}
 	return m, nil

@@ -76,7 +76,7 @@ func lastMessage(v session.View) string {
 // is applied to the composed line (selectedRow/dimRow wrap the whole thing in
 // renderList), so ANSI bytes from a later style never enter the width math —
 // the same discipline gsv's formatStashLine documents.
-func formatRow(v session.View, home string, now time.Time, width int) string {
+func formatRow(v session.View, override, home string, now time.Time, width int) string {
 	const fixedCols = 5 // glyph(1) + 4 separator spaces between the 5 fields
 	budget := width - fixedCols - ageWidth
 	if budget < 0 {
@@ -104,7 +104,15 @@ func formatRow(v session.View, home string, now time.Time, width int) string {
 	// the last field on it, the message. Pinned by
 	// TestFormatRowDrawsANewlineFieldExactlyLikeTheSingleLineItMeans, which is
 	// the only test in the package that fails when the two are swapped.
-	name := truncateToWidth(flattenToRow(sanitize(v.DisplayName())), nameW)
+	//
+	// override is the user-set rename (see names.go): when set it REPLACES
+	// DisplayName() rather than adding a field, so the row's shape and every
+	// other column's budget are unaffected by whether a session was renamed.
+	display := v.DisplayName()
+	if override != "" {
+		display = override
+	}
+	name := truncateToWidth(flattenToRow(sanitize(display)), nameW)
 	dir := elideMiddle(flattenToRow(sanitize(homeAbbrev(v.CWD, home))), dirW)
 	age := compactAge(v.StatusUpdatedTime(), now)
 	msg := truncateToWidth(flattenToRow(sanitize(lastMessage(v))), msgW)
@@ -365,7 +373,7 @@ func (m Model) renderList(width, height int, pane lipgloss.Style) string {
 	}
 	for i := first; i < first+shown; i++ {
 		v := m.views[i]
-		line := formatRow(v, home, now, inner)
+		line := formatRow(v, m.names[v.SessionID], home, now, inner)
 		switch {
 		case i == m.cursor:
 			b.WriteString("\n" + selectedRow.Render("› "+line))
@@ -422,12 +430,20 @@ func (m Model) renderPreviewMetadata(v *session.View, innerW int, now time.Time)
 
 	var b strings.Builder
 	total, height, offset := m.preview.TotalLineCount(), m.preview.Height, m.preview.YOffset
-	b.WriteString(titleStyle.Render(previewTitle(
+	title := previewTitle(
 		m.focus == focusPreview,
 		scrollIndicator(total, height, offset),
 		widestScrollIndicator(total, height),
 		innerW,
-	)))
+	)
+	// While renaming, the input REPLACES the title line rather than adding one:
+	// previewMetadataLines must stay a fixed count regardless of mode (see its
+	// own doc comment and the M10 lesson referenced there).
+	if m.renaming {
+		b.WriteString(titleStyle.Render(fit("Rename: " + m.nameInput.View())))
+	} else {
+		b.WriteString(titleStyle.Render(title))
+	}
 	b.WriteString("\n" + fit(previewField("Status", v.Status)))
 	b.WriteString("\n" + fit(previewField("Version", v.Version)))
 	tty := v.TTY

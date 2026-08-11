@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -55,10 +56,24 @@ type Model struct {
 
 	focus   focusArea      // which pane j/k move
 	preview viewport.Model // scrolls the last exchange only; metadata stays pinned
+
+	names     map[string]string // sessionId -> user override; ccs's own file, never the registry
+	namesFile string
+	renaming  bool
+	renameFor string // sessionId captured at n-press; a mid-edit re-sort must not retarget
+	nameInput textinput.Model
 }
 
 func New() Model {
-	return Model{keys: defaultKeys()}
+	ni := textinput.New()
+	ni.CharLimit = 64
+	ni.Prompt = ""
+	return Model{
+		keys:      defaultKeys(),
+		names:     loadNames(namesPath()),
+		namesFile: namesPath(),
+		nameInput: ni,
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -86,6 +101,11 @@ func (m *Model) selected() *session.View {
 		return nil
 	}
 	return &m.views[m.cursor]
+}
+
+// overrideFor returns the user-set name for v, or "" when none was set.
+func (m Model) overrideFor(v *session.View) string {
+	return m.names[v.SessionID]
 }
 
 // costCmdForSelected requests the token/cost totals for whatever row is

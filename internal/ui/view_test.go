@@ -359,7 +359,7 @@ func TestFormatRowNeverExceedsItsWidthBudgetInDisplayColumns(t *testing.T) {
 	now := time.Now()
 	for name, v := range formatRowFixtures() {
 		for width := 0; width <= 120; width++ {
-			row := formatRow(v, "", now, width)
+			row := formatRow(v, "", "", now, width)
 			if w := lipgloss.Width(row); w > width {
 				t.Errorf("%s: formatRow at width %d returned a row %d columns wide: %q",
 					name, width, w, visibleText(row))
@@ -384,7 +384,7 @@ func TestFormatRowKeepsLaterFieldsOnTheRow(t *testing.T) {
 	const width = 54
 	now := time.Now()
 	for name, v := range formatRowFixtures() {
-		row := visibleText(formatRow(v, "", now, width))
+		row := visibleText(formatRow(v, "", "", now, width))
 		if !strings.Contains(row, "3h") {
 			t.Errorf("%s: the age column is gone from %q — an earlier field overran its budget",
 				name, row)
@@ -492,8 +492,8 @@ func TestFormatRowDrawsANewlineFieldExactlyLikeTheSingleLineItMeans(t *testing.T
 	now := time.Now()
 	for name, f := range multiLineRowFixtures() {
 		for width := 0; width <= 120; width++ {
-			got := formatRow(f.view, "", now, width)
-			want := formatRow(f.flat, "", now, width)
+			got := formatRow(f.view, "", "", now, width)
+			want := formatRow(f.flat, "", "", now, width)
 			if got != want {
 				t.Errorf("%s: at width %d the newline fixture renders as\n\t%q\nbut the same text written on one line renders as\n\t%q",
 					name, width, visibleText(got), visibleText(want))
@@ -527,14 +527,14 @@ func TestFormatRowIsAlwaysExactlyOneLine(t *testing.T) {
 	now := time.Now()
 	for name, f := range multiLineRowFixtures() {
 		for width := 0; width <= 120; width++ {
-			row := formatRow(f.view, "", now, width)
+			row := formatRow(f.view, "", "", now, width)
 			if n := strings.Count(row, "\n"); n > 0 {
 				t.Errorf("%s: formatRow at width %d contains %d newline(s), so this session draws across %d screen rows: %q",
 					name, width, n, n+1, visibleText(row))
 				break
 			}
 		}
-		row := visibleText(formatRow(f.view, "", now, observedWidth))
+		row := visibleText(formatRow(f.view, "", "", now, observedWidth))
 		for _, tail := range f.tails {
 			if !strings.Contains(row, tail) {
 				t.Errorf("%s: %q — the text after a newline — is missing from %q; flattening must JOIN the lines, not keep only the first (and the sweep above passes vacuously on a field clipped before its newline)",

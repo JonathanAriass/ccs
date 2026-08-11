@@ -2,11 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/JonathanAriass/ccs/internal/session"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -985,6 +988,15 @@ func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
 			t.Errorf("%s: metadata renders %d lines, previewMetadataLines = %d", c.name, got, previewMetadataLines)
 		}
 	}
+
+	// THIRD counted state: renaming replaces the title line with the input,
+	// it does not add one. A state-branching metadata block needs each state
+	// counted on its own — see the M10 lesson.
+	m.renaming = true
+	m.nameInput = textinput.New()
+	if got := strings.Count(m.renderPreviewMetadata(m.selected(), innerW, fixedNow), "\n") + 1; got != previewMetadataLines {
+		t.Errorf("renaming state renders %d lines, want %d", got, previewMetadataLines)
+	}
 }
 
 // TestPreviewViewportStyleHasNoFrameSize pins an assumption scrollIndicator's
@@ -1195,5 +1207,143 @@ func TestTabIsNoOpWhenPreviewNotVisible(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("Tab scheduled a command with no preview pane on screen")
+	}
+}
+
+// --- session rename: store override, mode-first dispatch, targeting the
+// session captured at n-press rather than the cursor row at save time ---
+
+func TestRenameOverrideShowsAndClears(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m.names = map[string]string{m.views[0].SessionID: "my-migration-fix"}
+	frame := visibleText(m.View())
+	if !strings.Contains(frame, "my-migration-fix") {
+		t.Errorf("override not shown:\n%s", frame)
+	}
+	delete(m.names, m.views[0].SessionID)
+	if strings.Contains(visibleText(m.View()), "my-migration-fix") {
+		t.Error("cleared override still shown")
+	}
+}
+
+func TestRenameModeRoutesKeysToTheFieldOnly(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	m.names = map[string]string{}
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("n did not enter rename mode")
+	}
+	startCursor := m.cursor
+	// Every one of these has a bound meaning outside the mode. BOTH halves:
+	// the char reaches the field AND the normal action does not fire.
+	for _, r := range "qjr\t" {
+		n, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = n.(Model)
+	}
+	if m.cursor != startCursor {
+		t.Errorf("j moved the cursor during rename")
+	}
+	if m.focus != focusList {
+		t.Errorf("tab switched panes during rename")
+	}
+	// textinput sanitizes its input to a single line (san(), textinput.go):
+	// tab collapses to one space rather than passing through or being
+	// dropped — verified against the vendored v1.0.0 source, not a guess.
+	if got := m.nameInput.Value(); got != "qjr " {
+		t.Errorf("field did not receive the typed keys: %q", got)
+	}
+	// And the app did not quit: reaching here at all is the assertion, but pin
+	// the mode too.
+	if !m.renaming {
+		t.Error("mode exited without Enter/Esc")
+	}
+}
+
+func TestRenameSaveClearAndCancel(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m.names = map[string]string{}
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+	sid := m.views[0].SessionID
+
+	type step struct {
+		typed string
+		key   tea.KeyType
+		want  string // expected override after the step ("" = none)
+	}
+	// save, then clear via empty save, then cancel must not resurrect
+	for _, s := range []step{
+		{"fix-db", tea.KeyEnter, "fix-db"},
+		{"", tea.KeyEnter, ""},
+		{"ghost", tea.KeyEsc, ""},
+	} {
+		n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		m = n.(Model)
+		m.nameInput.SetValue(s.typed)
+		n, _ = m.Update(tea.KeyMsg{Type: s.key})
+		m = n.(Model)
+		if got := m.names[sid]; got != s.want {
+			t.Fatalf("after %q+%v: override=%q want %q", s.typed, s.key, got, s.want)
+		}
+		if m.renaming {
+			t.Fatal("mode did not exit")
+		}
+	}
+	// persistence: a fresh load sees the state the LAST SAVE left (cleared)
+	if got := loadNames(m.namesFile); len(got) != 0 {
+		t.Fatalf("cleared override persisted: %v", got)
+	}
+
+	// Hostile input: a typed name is transcript-adjacent content the SAME as
+	// every other field this package draws, and formatRow's own callers all
+	// go through sanitize+flattenToRow. The Enter path must too, or a raw
+	// escape/control byte lands in m.names and (via formatRow, unsanitized)
+	// on screen every time the row renders — not just once, like a transcript
+	// message would.
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	m.nameInput.SetValue("ev\x1b[2Jil\rx")
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = n.(Model)
+	if got := controlChars(m.names[sid]); len(got) > 0 {
+		t.Errorf("stored override contains control bytes: %q in %q", got, m.names[sid])
+	}
+}
+
+func TestRenameTargetsTheSessionCapturedAtNPress(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m.names = map[string]string{}
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+	sidA := m.views[0].SessionID
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	// a poll re-sorts the list mid-edit: B now sits where A was
+	m.views[0], m.views[1] = m.views[1], m.views[0]
+	m.nameInput.SetValue("belongs-to-A")
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = n.(Model)
+	if m.names[sidA] != "belongs-to-A" {
+		t.Errorf("rename followed the ROW, not the session: %v", m.names)
+	}
+}
+
+func TestRenamePersistFailureDegradesWithStatus(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.names = map[string]string{}
+	dir := t.TempDir()
+	os.Chmod(dir, 0o555)
+	defer os.Chmod(dir, 0o755)
+	m.namesFile = filepath.Join(dir, "sub", "names.json") // MkdirAll will fail
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	m.nameInput.SetValue("ephemeral")
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = n.(Model)
+	if m.names[m.views[0].SessionID] != "ephemeral" {
+		t.Error("in-memory rename must survive a failed persist")
+	}
+	if !strings.Contains(m.status, "rename won't persist") {
+		t.Errorf("no degradation warning, status=%q", m.status)
 	}
 }
