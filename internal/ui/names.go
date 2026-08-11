@@ -18,14 +18,26 @@ func namesPath() string {
 }
 
 // loadNames treats a missing or corrupt file as empty: a broken names file
-// must never prevent ccs from starting.
+// must never prevent ccs from starting. This includes the JSON literal
+// "null" specifically: json.Unmarshal("null", &m) sets m to nil and returns
+// NO error, so the corrupt-file branch below never fires for it — a plain
+// `len(got) == 0` check on the result cannot tell nil from an empty map, and
+// a nil map panics on the very first `m.names[id] = name` write (a names.json
+// containing "null" — e.g. from an empty `{}` mis-typed, or hand-edited — used
+// to crash ccs on the first rename). Any other malformed JSON (an array, a
+// number, a truncated object) already fails Unmarshal and hits the error
+// branch; "null" is the one shape that succeeds while still meaning "nothing
+// here".
 func loadNames(path string) map[string]string {
 	m := map[string]string{}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return m
 	}
-	if json.Unmarshal(b, &m) != nil {
+	if err := json.Unmarshal(b, &m); err != nil {
+		return map[string]string{}
+	}
+	if m == nil {
 		return map[string]string{}
 	}
 	return m

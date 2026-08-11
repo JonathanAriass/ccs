@@ -58,6 +58,13 @@ func (k keyMap) ShortHelp() []key.Binding {
 // the legend is being elided for width anyway, so the binding is also the one
 // costing room the others could use.
 //
+// Rename joins Cycle here for the same reason, one step worse: the rename
+// input is drawn inside the preview pane's metadata block (renderPreviewMetadata),
+// which View does not call at all below this threshold — so advertising "n
+// rename" there would not name a no-op, it would name an INVISIBLE modal that
+// still captures every keystroke (including q) into a field nothing on screen
+// shows. See handleKey's own previewVisible() guard on the Rename case.
+//
 // previewVisible is passed in rather than recomputed so this cannot disagree
 // with what View drew or with how handleKey routed the key — the same
 // single-predicate discipline previewVisible's own doc comment describes.
@@ -68,6 +75,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) shortHelpFor(previewVisible bool) []key.Binding {
 	if !previewVisible {
 		k.Cycle.SetEnabled(false)
+		k.Rename.SetEnabled(false)
 	}
 	return k.ShortHelp()
 }

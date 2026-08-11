@@ -6,16 +6,39 @@ import (
 	"testing"
 )
 
+// wantEmptyNonNil fails unless got is a non-nil, zero-length map.
+//
+// `len(got) != 0` alone cannot tell a nil map from an empty one — len(nil)
+// is 0 — and json.Unmarshal([]byte("null"), &m) sets m to nil while
+// returning NO error, so a names.json containing the literal "null" used to
+// sail through this exact check while leaving loadNames' caller holding a
+// nil map, which panics on its first write (m.names[id] = name). Both
+// halves matter: nil must fail this just as loudly as a populated map would.
+func wantEmptyNonNil(t *testing.T, label string, got map[string]string) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s: want a non-nil empty map, got nil", label)
+	}
+	if len(got) != 0 {
+		t.Fatalf("%s: want empty map, got %v", label, got)
+	}
+}
+
 func TestLoadNamesMissingAndCorrupt(t *testing.T) {
 	dir := t.TempDir()
-	if got := loadNames(filepath.Join(dir, "absent.json")); len(got) != 0 {
-		t.Fatalf("missing file: want empty map, got %v", got)
-	}
+	wantEmptyNonNil(t, "missing file", loadNames(filepath.Join(dir, "absent.json")))
+
 	p := filepath.Join(dir, "corrupt.json")
 	os.WriteFile(p, []byte("{not json"), 0o644)
-	if got := loadNames(p); len(got) != 0 {
-		t.Fatalf("corrupt file: want empty map, got %v", got)
-	}
+	wantEmptyNonNil(t, "corrupt file", loadNames(p))
+
+	// The JSON literal "null" is the one shape that is NOT a decode error —
+	// Unmarshal("null", &m) succeeds and sets m to nil — so it needs its own
+	// fixture distinct from "corrupt.json" above, which fails to decode at
+	// all and would pass this test even without the nil-guard in loadNames.
+	nullPath := filepath.Join(dir, "null.json")
+	os.WriteFile(nullPath, []byte("null"), 0o644)
+	wantEmptyNonNil(t, "null-literal file", loadNames(nullPath))
 }
 
 func TestSaveNamesRoundTripsAndIsAtomic(t *testing.T) {

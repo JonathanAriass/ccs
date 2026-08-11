@@ -197,6 +197,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// renaming it has to reach the input field instead of quitting ccs.
 	if m.renaming {
 		switch msg.Type {
+		case tea.KeyCtrlC:
+			// ctrl+c is the universal terminal interrupt, not a letter the
+			// field needs (unlike q — see the comment above). A rename in
+			// progress does not outrank it: quit exactly as it would outside
+			// the mode, rather than swallowing it as a dead key.
+			return m, tea.Quit
 		case tea.KeyEsc:
 			m.renaming = false
 			m.nameInput.Blur()
@@ -204,6 +210,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			m.renaming = false
 			m.nameInput.Blur()
+			if m.names == nil {
+				// Defensive: loadNames now guards its own nil-map return
+				// (see names.go), but this keeps the Enter path safe even if
+				// a future caller ever hands Model a nil names map directly.
+				m.names = map[string]string{}
+			}
 			name := strings.TrimSpace(flattenToRow(sanitize(m.nameInput.Value())))
 			if name == "" {
 				delete(m.names, m.renameFor)
@@ -306,6 +318,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, m.keys.Rename):
+		if !m.previewVisible() {
+			// The rename input is drawn inside renderPreviewMetadata, which
+			// View never calls at this height (see previewVisible's doc
+			// comment) — entering the mode here would be an invisible modal:
+			// nothing on screen shows it, yet it steals q and captures
+			// keystrokes into a field nobody can see. Deliberately a no-op,
+			// same discipline as Cycle just above.
+			return m, nil
+		}
 		v := m.selected()
 		if v == nil {
 			return m, nil

@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,7 +18,10 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// TestMain forces a deterministic TrueColor profile for the test binary.
+// TestMain forces a deterministic TrueColor profile for the test binary, and
+// points every New()-built Model's names store at a throwaway directory
+// instead of the developer's real one.
+//
 // lipgloss auto-detects the terminal's color profile, and `go test` runs
 // with stdout/stderr that are not a TTY, so lipgloss would otherwise strip
 // every style's ANSI codes and the dim/selected/error styling this file
@@ -24,8 +29,24 @@ import (
 // internal/ui/diff_test.go precedent. Does not affect the compiled ccs
 // binary, which still auto-detects the profile of the real terminal it runs
 // in.
+//
+// namesPath() resolves under $XDG_CONFIG_HOME, and New() (called from ~16
+// sites across this package's tests) loads it unconditionally — there is no
+// load-side seam the way m.namesFile is a write-side seam for saveNames.
+// Without this, the suite reads whatever really lives at
+// ~/.config/ccs/names.json on the machine running it: a planted entry keyed
+// on one of this package's fixture SessionIDs ("s0", "s1", ... or "") changes
+// which tests pass, which breaks the stated constraint that tests never touch
+// the real ~/.config/ccs/. Setting the env var here, once, before any test
+// constructs a Model closes that for the whole package — os.Getenv is read
+// fresh on every namesPath() call, so every subsequent New() picks it up.
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
+	dir, err := os.MkdirTemp("", "ccs-test-config-*")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CONFIG_HOME", dir)
 	os.Exit(m.Run())
 }
 
@@ -162,6 +183,75 @@ func TestViewSanitizesShortCWD(t *testing.T) {
 	out := visibleText(m.View())
 	if got := controlChars(out); len(got) > 0 {
 		t.Errorf("frame still contains %d control characters from an untruncated CWD: %q", len(got), got)
+	}
+}
+
+// TestHandEditedNamesJSONIsSanitizedAtRender pins I2 from the task-1 review:
+// the ONE path a hostile override can reach formatRow WITHOUT first passing
+// through textinput's own upstream scrubbing. Every OTHER path into
+// m.names — SetValue, live typing, paste — is already sanitized before ccs
+// ever sees the value (see TestRenameSaveClearAndCancel's hostile-name step
+// and its documented deviation: textinput's runeutil sanitizer strips every
+// control rune before Value() returns). A hand-edited or externally-written
+// names.json has no such upstream scrubber: loadNames reads it raw, and
+// renderList hands the raw string straight to formatRow as the override.
+//
+// Current behaviour is correct: formatRow substitutes the override into
+// `display` BEFORE its own sanitize+flattenToRow call (view.go), so the
+// override rides the exact same pipeline DisplayName() does. But nothing
+// pinned that before this test, and the review demonstrated a plausible
+// refactor — moving the override substitution to AFTER the sanitize call —
+// that reopens this while the ENTIRE package suite stays green. This test is
+// what would catch it.
+func TestHandEditedNamesJSONIsSanitizedAtRender(t *testing.T) {
+	// \x1b[2J is a real terminal escape (clear screen); \r is what sanitize
+	// specifically drops (not just middle-dots); the embedded \n plus a
+	// marker AFTER it is what proves flattenToRow JOINS rather than merely
+	// truncates before the newline — the same "tails" discipline
+	// multiLineRowFixtures uses elsewhere in this file.
+	const hostile = "ev\x1b[2Jil\rx\nTAIL"
+	// json.Marshal, not a hand-built string: a raw ESC or CR byte is not
+	// valid unescaped JSON per RFC 8259, and this fixture needs to be
+	// genuinely valid JSON that round-trips through loadNames' own
+	// json.Unmarshal -- the same way a real hand-edited names.json would.
+	fixture, err := json.Marshal(map[string]string{"s0": hostile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "names.json")
+	if err := os.WriteFile(p, fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := sizedModel(1, 240, 30) // wide: the name column must comfortably fit the whole hostile string
+	m.views[0] = session.View{Session: session.Session{SessionID: "s0", Name: "s0", Status: "idle"}}
+	m.names = loadNames(p) // the LOAD path itself — not SetValue, not textinput
+	if got := controlChars(m.names["s0"]); len(got) == 0 {
+		t.Fatalf("fixture: the loaded override must still carry raw control bytes before render, got %q", m.names["s0"])
+	}
+
+	out := visibleText(m.View())
+	if got := controlChars(out); len(got) > 0 {
+		t.Errorf("frame still contains %d control characters from a hand-edited names.json: %q", len(got), got)
+	}
+	if strings.Contains(m.View(), "\x1b[2J") {
+		t.Error("raw escape sequence from names.json survived into the frame")
+	}
+
+	// One row per session: a raw newline in a hand-edited override must not
+	// make that session's row span multiple screen lines, the same invariant
+	// TestFormatRowIsAlwaysExactlyOneLine and
+	// TestListPaneDrawsExactlyOneRowPerSession pin for transcript-derived
+	// fields.
+	listW, _ := paneWidths(m.width)
+	pane := m.renderList(listW, bodyPaneHeight(m.height), listPane)
+	lines := listPaneContentLines(pane)
+	if len(lines) != 2 { // title + exactly one row
+		t.Fatalf("list pane drew %d content lines for 1 session with a hostile override, want 2 (title + one row):\n%s",
+			len(lines), pane)
+	}
+	if !strings.Contains(lines[1], "TAIL") {
+		t.Errorf("text after the override's embedded newline is missing — flattening must JOIN, not truncate: %q", lines[1])
 	}
 }
 
@@ -1133,6 +1223,13 @@ func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
 // there names a key that does nothing. The reject half alone would be satisfied
 // by dropping the binding altogether, which is why the accept half is here too.
 //
+// Rename rides the same gate for a worse reason than Tab's no-op: the rename
+// input is drawn inside renderPreviewMetadata, which View does not call at
+// all below the threshold — so "n rename" there would not name a no-op key,
+// it would name an INVISIBLE modal (see handleKey's Rename case and C2 in the
+// task-1 review). Checked with the SAME want as "switch pane" since both ride
+// shortHelpFor's previewVisible gate.
+//
 // The legend is read at a width where nothing is elided: at minTermWidth
 // bubbles drops trailing bindings for room, and "switch pane" missing because
 // the line was too short is a different fact from it being disabled.
@@ -1154,6 +1251,10 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 		legend := lines[len(lines)-1]
 		if got := strings.Contains(legend, "switch pane"); got != c.want {
 			t.Errorf("height %d: legend advertises \"switch pane\" = %v, want %v (preview visible = %v): %q",
+				c.height, got, c.want, c.want, strings.TrimRight(legend, " "))
+		}
+		if got := strings.Contains(legend, "rename"); got != c.want {
+			t.Errorf("height %d: legend advertises \"rename\" = %v, want %v (preview visible = %v): %q",
 				c.height, got, c.want, c.want, strings.TrimRight(legend, " "))
 		}
 		// The rest of the legend must survive either way — disabling one

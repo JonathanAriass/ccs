@@ -1238,6 +1238,14 @@ func TestRenameModeRoutesKeysToTheFieldOnly(t *testing.T) {
 	startCursor := m.cursor
 	// Every one of these has a bound meaning outside the mode. BOTH halves:
 	// the char reaches the field AND the normal action does not fire.
+	//
+	// NOTE: this loop sends KeyRunes '\t' — a typed TAB CHARACTER — not the
+	// Tab KEY. tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\t'}}.String()
+	// is "\t", and the Cycle binding is "tab", which only a
+	// tea.KeyMsg{Type: tea.KeyTab} produces. So this rune never could have
+	// exercised the Cycle guard below — it is here only to pin what
+	// textinput does with a literal tab byte (collapses it to one space; see
+	// the Value() assertion). The real Tab KEY is sent separately below.
 	for _, r := range "qjr\t" {
 		n, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		m = n.(Model)
@@ -1245,15 +1253,28 @@ func TestRenameModeRoutesKeysToTheFieldOnly(t *testing.T) {
 	if m.cursor != startCursor {
 		t.Errorf("j moved the cursor during rename")
 	}
-	if m.focus != focusList {
-		t.Errorf("tab switched panes during rename")
-	}
 	// textinput sanitizes its input to a single line (san(), textinput.go):
 	// tab collapses to one space rather than passing through or being
 	// dropped — verified against the vendored v1.0.0 source, not a guess.
 	if got := m.nameInput.Value(); got != "qjr " {
 		t.Errorf("field did not receive the typed keys: %q", got)
 	}
+
+	// The real Tab KEY, and Up/Down — none of these are runes, so the loop
+	// above cannot exercise them. All three are bound outside the mode
+	// (Cycle, Up, Down) and must be swallowed by the mode exactly like the
+	// rune keys above.
+	for _, kt := range []tea.KeyType{tea.KeyTab, tea.KeyUp, tea.KeyDown} {
+		n, _ = m.Update(tea.KeyMsg{Type: kt})
+		m = n.(Model)
+	}
+	if m.focus != focusList {
+		t.Errorf("tab switched panes during rename")
+	}
+	if m.cursor != startCursor {
+		t.Errorf("up/down moved the cursor during rename")
+	}
+
 	// And the app did not quit: reaching here at all is the assertion, but pin
 	// the mode too.
 	if !m.renaming {
@@ -1345,5 +1366,94 @@ func TestRenamePersistFailureDegradesWithStatus(t *testing.T) {
 	}
 	if !strings.Contains(m.status, "rename won't persist") {
 		t.Errorf("no degradation warning, status=%q", m.status)
+	}
+}
+
+// TestRenameIsNoOpWhenPreviewNotVisible is the C2 fix from the task-1 review:
+// the rename input is drawn inside renderPreviewMetadata (view.go), which
+// View never calls at all below previewFits' threshold — so entering the
+// mode there used to be an INVISIBLE modal. Measured before the fix: at
+// height 13 pressing n set m.renaming=true with nothing on screen to show
+// it, q typed into the field instead of quitting, and Enter silently
+// renamed the session to "q".
+//
+// Mirrors TestTabIsNoOpWhenPreviewNotVisible's fixture and both-halves
+// shape: n must not enter the mode below the threshold, and (by not
+// entering it) q must still quit normally there — the same session that,
+// above the threshold, n DOES enter (every other TestRename* test in this
+// file proves that half, built on modelWithOverflowingPreview's tall
+// fixture).
+func TestRenameIsNoOpWhenPreviewNotVisible(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13})
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at height 13")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = next.(Model)
+	if m.renaming {
+		t.Error("n entered rename mode with no preview pane on screen")
+	}
+	if cmd != nil {
+		t.Error("n scheduled a command with no preview pane on screen")
+	}
+
+	// With the mode never entered, q must still be Quit — not swallowed by a
+	// field nothing on screen shows.
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if quitCmd == nil {
+		t.Fatal("q must return a command")
+	}
+	if _, ok := quitCmd().(tea.QuitMsg); !ok {
+		t.Error("q must still quit when the (never-entered) rename mode is not active")
+	}
+}
+
+// TestCtrlCQuitsDuringRename pins I3 from the task-1 review: ctrl+c is the
+// universal terminal interrupt, not a letter the field needs the way q is
+// (see handleKey's own comment on that). Before the fix it fell through to
+// m.nameInput.Update, landed in textinput's default branch, and
+// insertRunesFromUserInput(nil) did nothing — renaming stayed true, nothing
+// quit, nothing typed: a dead key, and (compounded with C2) a mode with no
+// escape hatch at all when the preview pane is not on screen.
+func TestCtrlCQuitsDuringRename(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("fixture: n did not enter rename mode")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c during rename must return a command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("ctrl+c during rename must quit, not be swallowed by the input field")
+	}
+}
+
+// TestRenameEnterSurvivesANilNamesMap pins the defensive guard in the Enter
+// path (update.go): loadNames itself is now nil-guarded (see names.go and
+// C1 in the task-1 review), but this is belt-and-suspenders for any future
+// caller that hands Model a nil names map directly — e.g. a test fixture, or
+// a struct literal that never calls New(). Without the guard,
+// `m.names[m.renameFor] = name` panics on assignment to a nil map.
+func TestRenameEnterSurvivesANilNamesMap(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.names = nil
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+	sid := m.views[0].SessionID
+
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	m.nameInput.SetValue("survived")
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // must not panic
+	m = n.(Model)
+
+	if m.names[sid] != "survived" {
+		t.Errorf("rename lost on a nil starting map: %v", m.names)
 	}
 }
