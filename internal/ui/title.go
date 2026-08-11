@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unicode/utf8"
 
@@ -26,7 +27,7 @@ const titleNameLimit = 64
 
 // titleSeq builds the OSC 0 (icon+window title) sequence for a name.
 //
-// The name goes through three passes before it reaches the payload:
+// The name goes through four passes before it reaches the payload:
 //
 //   - sanitize + flattenToRow, shared with the preview pane: strips C0
 //     controls and DEL, collapses newlines. A title is transcript-adjacent
@@ -41,9 +42,15 @@ const titleNameLimit = 64
 //     byte, say) survives sanitize whenever nothing ELSE in the string trips
 //     its needsSanitizing fast path — this runs unconditionally instead, so
 //     the result no longer depends on what else happens to be in the name.
+//   - strings.TrimSpace. The typed path (update.go's Enter handler) already
+//     trims before ever writing to m.names, so this is dead weight on that
+//     path — but names.json is hand-editable and applies no such rule, and a
+//     whitespace-only entry there would otherwise still count as "renamed"
+//     (pushTitlesCmd's caller only skips a literal ""), quietly blanking the
+//     real tab's title every poll instead of leaving it alone.
 //   - a titleNameLimit-rune clamp, see its own doc comment.
 func titleSeq(name string) string {
-	s := scrubC1AndInvalidUTF8(flattenToRow(sanitize(name)))
+	s := strings.TrimSpace(scrubC1AndInvalidUTF8(flattenToRow(sanitize(name))))
 	if n := utf8.RuneCountInString(s); n > titleNameLimit {
 		r := []rune(s)
 		s = string(r[:titleNameLimit])
@@ -129,8 +136,12 @@ func pushTitlesCmd(views []session.View, names map[string]string) tea.Cmd {
 // the terminal keeps consuming bytes as part of that one control sequence
 // until it finds a terminator, silently swallowing whatever the tty writes
 // next. So a short write gets a best-effort terminating BEL rather than
-// being left dangling; if even that can't land, there is nothing further to
-// do and the write is abandoned exactly as a full failure would be.
+// being left dangling. That follow-up write can itself fail on a queue that
+// is still full — there is nothing further to retry with at that point, but
+// unlike a clean failure (nothing ever reached the tty), the partial
+// sequence from the FIRST write already did. The tty is left holding a
+// dangling, unterminated OSC either way; the follow-up BEL is a best effort
+// at closing it, not a guarantee.
 func pushOne(dev, seq string) {
 	f, err := os.OpenFile(dev, os.O_WRONLY|os.O_APPEND|syscall.O_NONBLOCK, 0)
 	if err != nil {

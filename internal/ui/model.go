@@ -103,6 +103,39 @@ func (m *Model) selected() *session.View {
 	return &m.views[m.cursor]
 }
 
+// exitRenameIfInputCannotBeDrawn closes an open rename the moment the input
+// it lives in can no longer be shown, and must be called after every state
+// change that can move either half of that condition — a resize
+// (previewVisible) or a poll (selected()).
+//
+// handleKey's Rename case refuses to ENTER the mode when !previewVisible(),
+// but entry is a door, not an invariant: m.renaming survives every message
+// after it, and two different messages can invalidate the surface the input
+// is drawn on without ever touching m.renaming themselves.
+//   - tea.WindowSizeMsg: shrinking below previewFits' threshold mid-edit
+//     reaches renderPreview's "no second pane" branch (view.go), which never
+//     calls renderPreviewMetadata — the same invisible modal the entry guard
+//     exists to prevent, just reached through a different door. `q` then
+//     types into a field nothing on screen shows instead of quitting, while
+//     the footer legend (correctly) stops advertising `n rename` — leaving it
+//     lying about what `q` currently does.
+//   - sessionsMsg: every session the poll knows about can exit while one is
+//     mid-rename (reconcile has nothing left to anchor the cursor to), which
+//     hits renderPreview's `v == nil` branch — same defect, rarer trigger.
+//
+// Both collapse to one predicate: the input is drawn only when
+// previewVisible() AND a session is selected (renderPreviewMetadata needs a
+// non-nil *session.View). Closing the mode from a single, shared call site
+// after both message types keeps that in agreement with the render side by
+// construction, the same discipline previewVisible's own doc comment
+// describes for View and handleKey.
+func (m *Model) exitRenameIfInputCannotBeDrawn() {
+	if m.renaming && (!m.previewVisible() || m.selected() == nil) {
+		m.renaming = false
+		m.nameInput.Blur()
+	}
+}
+
 // overrideFor returns the user-set name for v, or "" when none was set.
 func (m Model) overrideFor(v *session.View) string {
 	return m.names[v.SessionID]

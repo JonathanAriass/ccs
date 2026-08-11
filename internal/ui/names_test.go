@@ -41,6 +41,39 @@ func TestLoadNamesMissingAndCorrupt(t *testing.T) {
 	wantEmptyNonNil(t, "null-literal file", loadNames(nullPath))
 }
 
+// TestNewWiresTheRealNamesFile pins the final review's I3 finding: every
+// rename test in the package injects m.names/m.namesFile by hand, and
+// TestMain points XDG_CONFIG_HOME at an empty temp dir, so no test ever
+// observed New() actually reading (or targeting) a real path. Two
+// independent mutations at the New() call site — loadNames(namesPath()) →
+// an empty map, and namesFile: namesPath() → "" — both left the whole
+// suite green: the first silently breaks the feature's headline promise
+// (overrides never survive a restart) and the second breaks every save
+// (`rename won't persist` on every rename, nothing ever written). This
+// test seeds a real file under a temp XDG_CONFIG_HOME, builds a model the
+// way main() does — through New(), not a hand-built struct literal — and
+// checks both halves of the wiring at once.
+func TestNewWiresTheRealNamesFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	want := filepath.Join(dir, "ccs", "names.json")
+	if err := os.MkdirAll(filepath.Dir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(want, []byte(`{"seeded-session":"seeded-name"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New()
+
+	if got := m.names["seeded-session"]; got != "seeded-name" {
+		t.Errorf("New() did not load the on-disk override: m.names[%q] = %q, want %q", "seeded-session", got, "seeded-name")
+	}
+	if m.namesFile != want {
+		t.Errorf("m.namesFile = %q, want %q", m.namesFile, want)
+	}
+}
+
 func TestSaveNamesRoundTripsAndIsAtomic(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ccs", "names.json")
 	want := map[string]string{"sess-1": "my migration"}

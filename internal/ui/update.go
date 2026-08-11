@@ -128,6 +128,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.syncPreview()
+		m.exitRenameIfInputCannotBeDrawn()
 		return m, nil
 
 	case tickMsg:
@@ -168,6 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if sel := m.selected(); sel != nil && sel.SessionID != prevSelID {
 			m.preview.GotoTop()
 		}
+		m.exitRenameIfInputCannotBeDrawn()
 		// Refresh the selected row's cost every poll too, not just on cursor
 		// move: a busy session's transcript keeps growing, so its cost should
 		// keep climbing on screen without the user having to nudge the cursor.
@@ -328,7 +330,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		v := m.selected()
-		if v == nil {
+		// A View with an empty SessionID has no identity to key an override
+		// on. reconcile (above) already refuses to alias identity-less views
+		// to each other for exactly this reason; the rename path needs the
+		// same discipline, or worse: m.names[""] would alias EVERY
+		// identity-less row to the same override AND push the same title to
+		// every one of their real ttys — a rename crossing session
+		// boundaries onto other people's terminal tabs, not just a cosmetic
+		// mix-up in the list.
+		if v == nil || v.SessionID == "" {
 			return m, nil
 		}
 		m.renaming = true

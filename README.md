@@ -35,15 +35,23 @@ session and the app as a whole, regardless of which pane j/k currently move.
 
 **Renaming is ccs's own label, not Claude Code's.** Press `n` to edit the
 selected session's name; ⏎ saves, Esc cancels, and saving an empty value
-clears the override back to the auto-name. Overrides live in ccs's own
-`~/.config/ccs/names.json`, keyed by session ID — they survive restarts and
-`/resume`, but are dropped on `/clear` since that starts a new session ID. A
-renamed session's name is also pushed to its real
-iTerm2 tab title, and re-asserted on every poll: Claude Code periodically
-rewrites the tab title on its own, so a one-shot push would silently revert.
-Clearing the override stops the re-assertion but does not itself restore
-whatever title was showing before — the tab keeps the last title it was
-given until something else (Claude Code included) writes a new one.
+clears the override back to the auto-name. The override replaces the name
+shown in the list; the preview pane has no name field of its own (its
+metadata is status/version/tty/activity/cost), so the override appears
+there only transiently, in the rename input itself, while editing.
+Overrides live in ccs's own `$XDG_CONFIG_HOME/ccs/names.json` (falling back
+to `~/.config/ccs/names.json` when that variable is unset), keyed by
+session ID — they survive restarts and `claude -r`/`--resume`, but are
+dropped on `/clear` since that starts a new session ID. A renamed session's
+name is also pushed to its real iTerm2 tab title, and re-asserted on every
+poll: Claude Code periodically rewrites the tab title on its own, so a
+one-shot push would silently revert. A session with no tty (a
+background/daemon process — the same case ⏎ reports as "no tab to focus")
+is renamed in the list like any other, but never receives a tab-title push,
+since there is no tab to write to. Clearing the override stops the
+re-assertion but does not itself restore whatever title was showing before
+— the tab keeps the last title it was given until something else (Claude
+Code included) writes a new one.
 
 **Live-only.** A session only appears once, and only while its process is
 running. Sessions from the registry whose PID has died, or been reused by an

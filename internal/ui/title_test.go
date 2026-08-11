@@ -23,6 +23,19 @@ func TestTitleSeqSanitizesHostileNames(t *testing.T) {
 	}
 }
 
+// TestTitleSeqTrimsWhitespaceOnlyName closes a gap the typed path doesn't
+// have: update.go's Enter handler already TrimSpaces before ever writing to
+// m.names, so a whitespace-only TYPED name is treated as a clear and never
+// reaches here at all. names.json is hand-editable and applies no such rule,
+// and pushTitlesCmd's own caller only skips a literal "" — so a hand-edited
+// value like "   " would otherwise still count as "renamed" and blank the
+// real tab's title every poll.
+func TestTitleSeqTrimsWhitespaceOnlyName(t *testing.T) {
+	if got, want := titleSeq("   "), "\x1b]0;\a"; got != want {
+		t.Errorf("a whitespace-only name must trim to an empty payload: got %q want %q", got, want)
+	}
+}
+
 // TestTitleSeqClampsToCharLimit pins both directions of the length bound:
 // nameInput.CharLimit (model.go) guards only the TYPED path, but a name can
 // also arrive via a hand-edited names.json, which has no limit at all. A

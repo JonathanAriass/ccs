@@ -1332,20 +1332,96 @@ func TestRenameSaveClearAndCancel(t *testing.T) {
 	}
 }
 
+// TestRenameTargetsTheSessionCapturedAtNPress delivers the mid-edit re-sort
+// as a REAL sessionsMsg through Update, not a hand-swap of m.views — the
+// final review's I4 finding. A hand-swap only pins that renameFor (captured
+// at n-press) survives some slice mutation; it never actually exercises the
+// path a real 2-second poll takes while a rename is open — reconcile's
+// cursor-tracking, syncPreview, and (since C1) the shared
+// exitRenameIfInputCannotBeDrawn guard all run on the way there, and any of
+// them could regress this without a hand-swapped test ever noticing.
 func TestRenameTargetsTheSessionCapturedAtNPress(t *testing.T) {
 	m := modelWithOverflowingPreview(t, 2)
 	m.names = map[string]string{}
 	m.namesFile = filepath.Join(t.TempDir(), "names.json")
 	sidA := m.views[0].SessionID
+	sidB := m.views[1].SessionID
 	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = n.(Model)
-	// a poll re-sorts the list mid-edit: B now sits where A was
-	m.views[0], m.views[1] = m.views[1], m.views[0]
+
+	// A poll re-sorts the list mid-edit: B now sits where A was. This is the
+	// same shape sortViews (session package) produces — a status change
+	// floats one session to the top — delivered exactly as Update receives
+	// it from a real poll: msg.views already in the new order.
+	resorted := []session.View{m.views[1], m.views[0]}
+	n, _ = m.Update(sessionsMsg{views: resorted})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("the re-sort exited rename mode — fixture expects the preview to stay visible and a session to stay selected")
+	}
+
 	m.nameInput.SetValue("belongs-to-A")
 	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = n.(Model)
 	if m.names[sidA] != "belongs-to-A" {
 		t.Errorf("rename followed the ROW, not the session: %v", m.names)
+	}
+	if _, ok := m.names[sidB]; ok {
+		t.Errorf("rename leaked onto session B, which merely inherited A's old row: %v", m.names)
+	}
+}
+
+// TestRenameNoOpsOnIdentitylessSession pins the final review's I5 finding:
+// m.renameFor = v.SessionID used to accept "". A View with an empty
+// SessionID has no identity to key an override on — reconcile already
+// refuses to alias identity-less views to each other for exactly this
+// reason (see its own doc comment) — but the Rename case adopted no such
+// discipline, so renaming one identity-less session silently renamed EVERY
+// identity-less session in the list (same map key) and pushed the same
+// title to every one of their real ttys, crossing session boundaries onto
+// terminals the user never selected.
+//
+// Both directions live in one test: entering the mode must no-op (nothing
+// to pin on the OTHER side — a no-op entry means Enter/save/push never run
+// at all), and the tty writes that WOULD have happened if entry had
+// silently succeeded must not have happened either.
+func TestRenameNoOpsOnIdentitylessSession(t *testing.T) {
+	old := devDir
+	devDir = t.TempDir()
+	defer func() { devDir = old }()
+	os.WriteFile(filepath.Join(devDir, "ttys001"), nil, 0o644)
+	os.WriteFile(filepath.Join(devDir, "ttys002"), nil, 0o644)
+
+	m := New()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 30})
+	m = next.(Model)
+	next, _ = m.Update(sessionsMsg{views: []session.View{
+		{Session: session.Session{SessionID: ""}, TTY: "ttys001"},
+		{Session: session.Session{SessionID: ""}, TTY: "ttys002"},
+	}})
+	m = next.(Model)
+	if !m.previewVisible() || m.selected() == nil {
+		t.Fatal("fixture: preview must be visible with a session selected")
+	}
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+	m.names = map[string]string{}
+
+	n, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if m.renaming {
+		t.Error("n entered rename mode for an identity-less session")
+	}
+	if cmd != nil {
+		t.Error("n scheduled a command for an identity-less session")
+	}
+	if len(m.names) != 0 {
+		t.Errorf("an override was stored for an identity-less session: %v", m.names)
+	}
+	if b, _ := os.ReadFile(filepath.Join(devDir, "ttys001")); len(b) != 0 {
+		t.Errorf("ttys001 was written despite the guard: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(devDir, "ttys002")); len(b) != 0 {
+		t.Errorf("ttys002 was written despite the guard: %q", b)
 	}
 }
 
@@ -1455,5 +1531,107 @@ func TestRenameEnterSurvivesANilNamesMap(t *testing.T) {
 
 	if m.names[sid] != "survived" {
 		t.Errorf("rename lost on a nil starting map: %v", m.names)
+	}
+}
+
+// TestRenameInputIsDrawnWhileEditing pins the final review's I2 finding: the
+// C2 fix's render half (renderPreviewMetadata drawing "Rename: <input>" in
+// place of the title line while m.renaming) had zero regression protection.
+// previewMetadataLines stays unchanged whether the title or the input is
+// drawn, so the only test that touches m.renaming in the renderer
+// (TestPreviewMetadataLineCountMatchesTheConstant) cannot tell the two
+// apart — the input could be silently dropped from the frame entirely with
+// the whole package suite staying green. Both directions: absent while not
+// renaming, present (with the typed value) while renaming.
+func TestRenameInputIsDrawnWhileEditing(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.names = map[string]string{}
+	m.namesFile = filepath.Join(t.TempDir(), "names.json")
+
+	if frame := visibleText(m.View()); strings.Contains(frame, "Rename:") {
+		t.Fatalf("fixture: \"Rename:\" shown before renaming even started:\n%s", frame)
+	}
+
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	for _, r := range "new-name" {
+		n, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = n.(Model)
+	}
+
+	frame := visibleText(m.View())
+	if !strings.Contains(frame, "Rename:") {
+		t.Errorf("rename input not drawn while editing:\n%s", frame)
+	}
+	if !strings.Contains(frame, "new-name") {
+		t.Errorf("typed value not visible in the frame:\n%s", frame)
+	}
+}
+
+// --- C1 (final review): m.renaming must not survive whatever invalidates
+// the surface its input is drawn on. handleKey's Rename case only guards the
+// ENTRY door (TestRenameIsNoOpWhenPreviewNotVisible); these two pin the
+// exitRenameIfInputCannotBeDrawn doors the same way, following that test's
+// own "resize below the threshold, then assert q still quits" shape. ---
+
+// TestRenameExitsWhenResizedBelowThreshold: a rename opened above the
+// preview threshold must close the moment a resize drops below it — before
+// the fix, m.renaming survived untouched, reproducing C2's invisible modal
+// (nothing on screen shows the field, the footer legend correctly stops
+// advertising "n rename" and is now lying about it, and q types into a
+// field nobody can see instead of quitting).
+func TestRenameExitsWhenResizedBelowThreshold(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("fixture: n did not enter rename mode")
+	}
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 13})
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at height 13")
+	}
+	if m.renaming {
+		t.Error("rename mode survived a resize below the preview threshold — the invisible modal is back")
+	}
+
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if quitCmd == nil {
+		t.Fatal("q must return a command")
+	}
+	if _, ok := quitCmd().(tea.QuitMsg); !ok {
+		t.Error("q must quit once the resize has closed the no-longer-visible rename mode")
+	}
+}
+
+// TestRenameExitsWhenAllSessionsExitMidEdit is C1's other door (also I1):
+// every session the poll knows about can exit while one is mid-rename,
+// landing on renderPreview's v == nil branch — same invisible-modal defect,
+// reached without ever touching previewVisible().
+func TestRenameExitsWhenAllSessionsExitMidEdit(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("fixture: n did not enter rename mode")
+	}
+
+	next, _ := m.Update(sessionsMsg{views: nil})
+	m = next.(Model)
+	if m.selected() != nil {
+		t.Fatal("fixture: draining every session must leave nothing selected")
+	}
+	if m.renaming {
+		t.Error("rename mode survived every session exiting mid-edit — same invisible-modal class as the resize door")
+	}
+
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if quitCmd == nil {
+		t.Fatal("q must return a command")
+	}
+	if _, ok := quitCmd().(tea.QuitMsg); !ok {
+		t.Error("q must quit once every session has exited and closed the rename mode")
 	}
 }
