@@ -40,6 +40,17 @@ import (
 // the real ~/.config/ccs/. Setting the env var here, once, before any test
 // constructs a Model closes that for the whole package — os.Getenv is read
 // fresh on every namesPath() call, so every subsequent New() picks it up.
+//
+// devDir (title.go) gets the same treatment, for the same reason. Task 2's
+// own tests re-aim it per-test, but that is a convention, not a structural
+// guarantee: this package's other fixtures already use real-looking ttys
+// ("ttys017", "ttys001", ...) and New() already loads the real names file
+// absent the line above, so a future test built the ordinary way — through
+// modelWithOverflowingPreview or similar, then running the cmd Update
+// returns instead of discarding it — would write straight into whatever
+// real tty those fixture strings happen to name on the machine running the
+// suite. Defaulting devDir to a throwaway directory for the whole package
+// closes that off the same way the XDG_CONFIG_HOME line does for names.json.
 func TestMain(m *testing.M) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	dir, err := os.MkdirTemp("", "ccs-test-config-*")
@@ -47,6 +58,13 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("XDG_CONFIG_HOME", dir)
+
+	ttyDir, err := os.MkdirTemp("", "ccs-test-dev-*")
+	if err != nil {
+		panic(err)
+	}
+	devDir = ttyDir
+
 	os.Exit(m.Run())
 }
 
