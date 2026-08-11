@@ -171,7 +171,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh the selected row's cost every poll too, not just on cursor
 		// move: a busy session's transcript keeps growing, so its cost should
 		// keep climbing on screen without the user having to nudge the cursor.
-		return m, m.costCmdForSelected()
+		return m, tea.Batch(m.costCmdForSelected(), pushTitlesCmd(m.views, m.names))
 
 	case costMsg:
 		// The selection can move on between the request going out and the
@@ -225,7 +225,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := saveNames(m.namesFile, m.names); err != nil {
 				m.status = "rename won't persist: " + err.Error()
 			}
-			return m, nil // Task 2 replaces nil with the title-push cmd
+			return m, pushTitlesCmd(m.views, m.names)
 		}
 		var cmd tea.Cmd
 		m.nameInput, cmd = m.nameInput.Update(msg)
