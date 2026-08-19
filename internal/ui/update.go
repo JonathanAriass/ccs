@@ -87,11 +87,10 @@ func reconcile(old, next []session.View, cursor int) ([]session.View, int) {
 // frame returns. The live model would keep Height 0 and no content, and
 // LineDown on a zero-height empty viewport returns without moving.
 func (m *Model) syncPreview() {
-	_, previewW := paneWidths(m.width)
-	inner := paneInnerWidth(previewW)
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	inner := paneInnerWidth(g.PrevW)
 	m.preview.Width = inner
-	m.preview.Height = previewBodyHeight(
-		paneInnerHeight(bodyPaneHeight(m.height)), previewMetadataLines)
+	m.preview.Height = previewBodyHeight(paneInnerHeight(g.PrevH), previewMetadataLines)
 
 	v := m.selected()
 	switch {

@@ -574,8 +574,12 @@ func TestWindowResizeAlonePropagatesToTheViewport(t *testing.T) {
 	m = next.(Model)
 	firstHeight, firstWidth := m.preview.Height, m.preview.Width
 
-	// Resize smaller, with NO sessionsMsg (no poll) in between.
-	next, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	// Resize smaller, with NO sessionsMsg (no poll) in between. Width stays
+	// >= stackBreakpoint deliberately, so this resize exercises the same
+	// side-by-side geometry it always has — the stacked arm gets its own
+	// dedicated coverage (TestViewportHeightMatchesRenderedPreviewInBothLayouts)
+	// rather than entangling itself with this test's unrelated concern.
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 16})
 	m = next.(Model)
 
 	wantHeight := previewBodyHeight(paneInnerHeight(bodyPaneHeight(16)), previewMetadataLines)
@@ -583,7 +587,7 @@ func TestWindowResizeAlonePropagatesToTheViewport(t *testing.T) {
 		t.Errorf("viewport Height = %d after a resize with no intervening poll, want %d (was %d before the resize)",
 			m.preview.Height, wantHeight, firstHeight)
 	}
-	_, wantWidth := paneWidths(80)
+	_, wantWidth := paneWidths(100)
 	wantWidth = paneInnerWidth(wantWidth)
 	if m.preview.Width != wantWidth {
 		t.Errorf("viewport Width = %d after a resize with no intervening poll, want %d (was %d before the resize)",
@@ -1207,6 +1211,48 @@ func TestTabIsNoOpWhenPreviewNotVisible(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Error("Tab scheduled a command with no preview pane on screen")
+	}
+}
+
+// TestTabAndRenameAreNoOpsJustBelowTheStackedPreviewFloor is
+// TestTabIsNoOpWhenPreviewNotVisible and TestRenameIsNoOpWhenPreviewNotVisible's
+// missing stacked-mode counterpart.
+//
+// Both of those fixtures sit at width 100 (side-by-side), so they only ever
+// exercise the WIDE arm's PreviewShown threshold. A previewVisible() that
+// reverted to the old standalone previewFits(m.height) — ignoring m.layout and
+// m.width entirely — would still pass both of them unchanged: at width 100,
+// height 13, previewFits and the wide arm agree. It would NOT redden on the
+// stacked arm's own, different floor (paneH >= 18, not >= 15) — a forced-stacked
+// terminal one row short of that floor would then wrongly report the preview
+// visible, and Tab/n would silently act on a pane that is not drawn. This
+// pins that boundary directly, in forced-stacked mode specifically.
+func TestTabAndRenameAreNoOpsJustBelowTheStackedPreviewFloor(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	m.layout = layoutStacked
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 19}) // paneH=17, one below the stacked floor (18)
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at height 19 stacked (paneH=17 < 18)")
+	}
+
+	before := m.focus
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.focus != before {
+		t.Errorf("Tab changed focus from %v to %v with no preview pane on screen (stacked)", before, m.focus)
+	}
+	if cmd != nil {
+		t.Error("Tab scheduled a command with no preview pane on screen (stacked)")
+	}
+
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = next.(Model)
+	if m.renaming {
+		t.Error("n entered rename mode with no preview pane on screen (stacked)")
+	}
+	if cmd != nil {
+		t.Error("n scheduled a command with no preview pane on screen (stacked)")
 	}
 }
 

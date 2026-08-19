@@ -289,23 +289,115 @@ func TestPreviewBodyHeight(t *testing.T) {
 	}
 }
 
-// TestPreviewFitsThresholdIsExactlyHeight15 pins previewFits' boundary in
-// BOTH directions, at the pure-function level, independent of any rendering.
-// Pinning only one side (e.g. "14 must not fit") leaves the other free to
-// drift — a mutant that changed ">=" to ">" would still fail 14 but wrongly
-// pass 15 through as well, and this table catches that.
+// TestLayoutGeomAutoBreakpointBothDirections pins the whole feature's
+// contract at its one load-bearing boundary: stackBreakpoint itself. Both
+// directions matter for the same reason every boundary test in this file
+// pins both sides — a mutant that changed "<" to "<=" would still stack at
+// 89 but wrongly stack at 90 too.
+func TestLayoutGeomAutoBreakpointBothDirections(t *testing.T) {
+	// width 89 stacks, 90 does not — the whole feature's contract.
+	if g := layoutGeom(layoutAuto, 5, stackBreakpoint-1, 40); !g.Stacked {
+		t.Errorf("width %d in auto: want stacked", stackBreakpoint-1)
+	}
+	if g := layoutGeom(layoutAuto, 5, stackBreakpoint, 40); g.Stacked {
+		t.Errorf("width %d in auto: want side-by-side", stackBreakpoint)
+	}
+}
+
+// TestLayoutGeomForcedIgnoresWidth pins that a forced mode is a command about
+// Stacked, not merely a hint auto-mode's width check can override.
+func TestLayoutGeomForcedIgnoresWidth(t *testing.T) {
+	if g := layoutGeom(layoutStacked, 5, 200, 40); !g.Stacked {
+		t.Error("forced stacked must stack at width 200")
+	}
+	if g := layoutGeom(layoutWide, 5, 50, 40); g.Stacked {
+		t.Error("forced wide must not stack at width 50")
+	}
+}
+
+// TestLayoutGeomStackedAllocation pins the stacked arm's floors and budget:
+// list >= its 5-row floor, preview >= its 13-row floor (or PreviewShown is
+// false and the list takes the whole pane), and the two heights sum to
+// EXACTLY the pane budget — no gap a border could leave uncovered, no
+// overlap that would double-draw a row.
+func TestLayoutGeomStackedAllocation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		nSessions, h int
+	}{
+		{"tall, few sessions", 1, 40},
+		{"tall, many sessions", 30, 40},
+		{"exactly at the stacked floor", 5, 20}, // paneH=18 = 5+13
+		{"one below the stacked floor", 5, 19},  // paneH=17 -> list-only
+		{"list-only heights keep working", 5, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := layoutGeom(layoutStacked, tc.nSessions, 60, tc.h)
+			paneH := bodyPaneHeight(tc.h)
+			wantShown := paneH >= 18
+			if g.PreviewShown != wantShown {
+				t.Fatalf("PreviewShown=%v want %v (paneH=%d)", g.PreviewShown, wantShown, paneH)
+			}
+			if !g.PreviewShown {
+				if g.ListH != paneH || g.ListW != 60 {
+					t.Errorf("list-only geom: ListH=%d ListW=%d want %d,60", g.ListH, g.ListW, paneH)
+				}
+				return
+			}
+			if g.ListW != 60 || g.PrevW != 60 {
+				t.Errorf("stacked panes must be full width: %d,%d", g.ListW, g.PrevW)
+			}
+			if g.ListH < 5 {
+				t.Errorf("ListH=%d below the 5-row floor", g.ListH)
+			}
+			if g.PrevH < 13 {
+				t.Errorf("PrevH=%d below the 13-row preview floor", g.PrevH)
+			}
+			if g.ListH+g.PrevH != paneH {
+				t.Errorf("ListH+PrevH=%d != paneH=%d", g.ListH+g.PrevH, paneH)
+			}
+		})
+	}
+}
+
+// TestLayoutGeomWideMatchesTheOldRule pins that side-by-side reproduces
+// today's geometry exactly: paneWidths' split, full pane height on both
+// sides, and PreviewShown following the same arithmetic previewFits used —
+// this arm is what previewFits' logic became, so the two must agree.
+func TestLayoutGeomWideMatchesTheOldRule(t *testing.T) {
+	for _, h := range []int{8, 14, 15, 30} {
+		g := layoutGeom(layoutWide, 5, 118, h)
+		lw, pw := paneWidths(118)
+		wantShown := paneInnerHeight(bodyPaneHeight(h)) >= previewMetadataLines+1
+		if g.PreviewShown != wantShown {
+			t.Errorf("h=%d PreviewShown=%v want %v", h, g.PreviewShown, wantShown)
+		}
+		if g.PreviewShown && (g.ListW != lw || g.PrevW != pw || g.ListH != bodyPaneHeight(h) || g.PrevH != bodyPaneHeight(h)) {
+			t.Errorf("h=%d wide geom diverges from the old rule: %+v", h, g)
+		}
+	}
+}
+
+// TestLayoutGeomWidePreviewShownThresholdIsExactlyHeight15 pins the wide
+// arm's PreviewShown boundary in BOTH directions, at the pure-function
+// level, independent of any rendering. Pinning only one side (e.g. "14 must
+// not fit") leaves the other free to drift — a mutant that changed ">=" to
+// ">" would still fail 14 but wrongly pass 15 through as well, and this
+// table catches that.
 //
 // The exact numbers: bodyPaneHeight(15) = 13, paneInnerHeight(13) = 11, and
 // previewMetadataLines (10) + 1 = 11 — so 15 lands EXACTLY on the boundary,
 // not comfortably inside it. That is deliberate coverage, not an arbitrary
-// choice of fixture: it is the value view.go's own TestPreviewPaneRendersAtHeight15ButNotHeight14
-// exercises end to end, so this test and that one must agree.
+// choice of fixture: it is the value view.go's own
+// TestPreviewPaneRendersAtHeight15ButNotHeight14 exercises end to end, so
+// this test and that one must agree.
 //
-// The boundary moved here from 14 to 15 when the preview's pinned metadata
-// block grew by one line (the Activity line, previewMetadataLines 9 → 10):
-// previewFits reads previewMetadataLines directly, so the extra line raises
-// the interior room the pane needs by one row too.
-func TestPreviewFitsThresholdIsExactlyHeight15(t *testing.T) {
+// This used to pin the standalone previewFits(termH) directly; that function
+// is gone (its arithmetic is now the wide arm's PreviewShown line above), so
+// the boundary is pinned through layoutGeom(layoutWide, ...) instead — a
+// wide width (118) so only the height boundary is under test, not the
+// breakpoint.
+func TestLayoutGeomWidePreviewShownThresholdIsExactlyHeight15(t *testing.T) {
 	cases := []struct {
 		termH int
 		want  bool
@@ -318,8 +410,8 @@ func TestPreviewFitsThresholdIsExactlyHeight15(t *testing.T) {
 		{30, true},
 	}
 	for _, c := range cases {
-		if got := previewFits(c.termH); got != c.want {
-			t.Errorf("previewFits(%d) = %v, want %v", c.termH, got, c.want)
+		if got := layoutGeom(layoutWide, 5, 118, c.termH).PreviewShown; got != c.want {
+			t.Errorf("layoutGeom(layoutWide, .., 118, %d).PreviewShown = %v, want %v", c.termH, got, c.want)
 		}
 	}
 }

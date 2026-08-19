@@ -96,8 +96,8 @@ func titleOf(m Model) string {
 	if v == nil {
 		return ""
 	}
-	_, previewW := paneWidths(m.width)
-	line, _, _ := strings.Cut(m.renderPreviewMetadata(v, paneInnerWidth(previewW), fixedNow), "\n")
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	line, _, _ := strings.Cut(m.renderPreviewMetadata(v, paneInnerWidth(g.PrevW), fixedNow), "\n")
 	return visibleText(line)
 }
 
@@ -770,6 +770,68 @@ func TestViewTerminalTooSmall(t *testing.T) {
 	}
 }
 
+// TestViewportHeightMatchesRenderedPreviewInBothLayouts pins the resolver's
+// whole reason to exist: syncPreview and View must derive the SAME preview
+// geometry. Mutation: let either consumer compute its own (e.g. syncPreview
+// reverting to bodyPaneHeight(m.height)) — this reddens in the stacked case,
+// where pane height != full height for the first time.
+func TestViewportHeightMatchesRenderedPreviewInBothLayouts(t *testing.T) {
+	for _, mode := range []layoutMode{layoutWide, layoutStacked} {
+		m := modelWithOverflowingPreview(t, 3)
+		m.layout = mode
+		n, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 40})
+		m = n.(Model)
+		g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+		if !g.PreviewShown {
+			t.Fatalf("mode %v: fixture must show the preview", mode)
+		}
+		want := previewBodyHeight(paneInnerHeight(g.PrevH), previewMetadataLines)
+		if m.preview.Height != want {
+			t.Errorf("mode %v: viewport Height=%d, resolver says %d", mode, m.preview.Height, want)
+		}
+	}
+}
+
+// TestStackedFrameJoinsTheListAboveThePreview pins the stacked arm's join
+// direction directly, independent of Task 2's own extended width/height
+// sweeps (which sweep layoutWide too, and so would still pass if the stacked
+// arm quietly kept lipgloss.JoinHorizontal — every pane would still be
+// present and every line still bounded, just arranged side by side instead
+// of stacked). The list pane's bottom border must be ABOVE the preview
+// pane's top border in the rendered frame: that ordering is JoinVertical's
+// signature and JoinHorizontal cannot produce it.
+func TestStackedFrameJoinsTheListAboveThePreview(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 3)
+	m.layout = layoutStacked
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = n.(Model)
+	if !m.previewVisible() {
+		t.Fatal("fixture must show the preview")
+	}
+
+	lines := strings.Split(m.View(), "\n")
+	listBottom, previewTop := -1, -1
+	for i, ln := range lines {
+		plain := visibleText(ln)
+		switch {
+		case strings.HasPrefix(plain, "╰") && listBottom == -1:
+			listBottom = i
+		case strings.HasPrefix(plain, "╭") && listBottom != -1 && previewTop == -1:
+			previewTop = i
+		}
+	}
+	if listBottom == -1 {
+		t.Fatalf("no list pane bottom border (╰) found in frame:\n%s", m.View())
+	}
+	if previewTop == -1 {
+		t.Fatalf("no preview pane top border (╭) found after the list pane's bottom border:\n%s", m.View())
+	}
+	if listBottom >= previewTop {
+		t.Errorf("list pane's bottom border (line %d) is not above the preview pane's top border (line %d) — stacked arm is not joining vertically:\n%s",
+			listBottom, previewTop, m.View())
+	}
+}
+
 // busyFrameModel builds a model whose every field is long enough to compete for
 // the width budget, so a width sweep exercises real truncation rather than a
 // frame that happens to be narrow.
@@ -943,8 +1005,8 @@ func TestPreviewTitleKeepsBothAffordancesAtEveryWidth(t *testing.T) {
 		for w := minTermWidth; w <= 80; w++ {
 			m := widthSweepModel(w, 20)
 			m.focus = focus
-			_, previewW := paneWidths(w)
-			innerW := paneInnerWidth(previewW)
+			g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+			innerW := paneInnerWidth(g.PrevW)
 
 			if m.preview.TotalLineCount() <= m.preview.Height {
 				t.Fatalf("width %d: fixture does not overflow (%d lines in %d rows) — there is no indicator to assert on",
@@ -1006,7 +1068,16 @@ func TestPreviewTitleOmitsTheIndicatorAtEveryWidthWhenItFits(t *testing.T) {
 	for _, focus := range []focusArea{focusList, focusPreview} {
 		for w := minTermWidth; w <= 80; w++ {
 			m := New()
-			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 20})
+			// Height 30, not the 20 several sibling sweeps use: this test's
+			// premise is "the exchange fits, at every WIDTH" — a concern
+			// orthogonal to height — but below stackBreakpoint the panes now
+			// stack, and a stacked preview's floor gives the exchange as
+			// little as one interior row. A tiny fixture that always fit at
+			// width 40 under the old (always side-by-side) geometry can
+			// overflow that one-row floor at height 20; height 30 keeps the
+			// pane tall enough that this two-line "hi" fixture fits in the
+			// stacked arm too, at every width the loop below sweeps.
+			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
 			m = next.(Model)
 			next, _ = m.Update(sessionsMsg{views: []session.View{{
 				Session:    session.Session{SessionID: "s0", Status: "idle", Version: "2.1.220"},

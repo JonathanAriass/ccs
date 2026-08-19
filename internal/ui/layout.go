@@ -382,23 +382,82 @@ func homeAbbrev(path, home string) string {
 	return path
 }
 
-// previewFits reports whether the preview pane has enough interior room, at
-// terminal height termH, to show at least one row of the actual exchange —
-// not just its pinned metadata block.
+// layoutMode is the user's layout preference. The zero value is auto.
+type layoutMode int
+
+const (
+	layoutAuto layoutMode = iota
+	layoutStacked
+	layoutWide
+)
+
+// stackBreakpoint is the auto-mode width below which the panes stack. At 90,
+// side-by-side yields ~32 preview interior columns — comfortable; below it the
+// side-by-side preview shrinks toward its degradation floors while the terminal
+// is usually TALL (a vertical iTerm2 split, a Neovim :terminal side window),
+// which stacking spends and side-by-side wastes.
+const stackBreakpoint = 90
+
+// paneGeom is where every pane dimension comes from. View renders from it,
+// syncPreview sizes the viewport from it, previewVisible reads it — ONE
+// resolver, so the renderer and the key router can never disagree about what
+// is on screen. (The live-preview review caught exactly that drift once: a
+// viewport sized for one pane height rendered into another.)
+type paneGeom struct {
+	ListW, ListH int
+	PrevW, PrevH int
+	Stacked      bool
+	PreviewShown bool
+}
+
+// stackedPreviewFloor is the smallest OUTER height a stacked preview pane is
+// worth drawing at: previewMetadataLines interior rows + 1 exchange line +
+// the border. Below it the pane shows metadata and zero exchange — worse than
+// no pane (see the list-only rationale in View).
+const stackedPreviewFloor = previewMetadataLines + 1 + paneBorderH // 13
+
+// stackedListFloor keeps the list useful when stacked: 3 rows + title + border.
+const stackedListFloor = 5
+
+// layoutGeom resolves the pane geometry for a frame. A forced mode is a
+// preference, not a command: geometry constraints (the stacked floor, the
+// side-by-side metadata rule) still decide PreviewShown, and a hidden preview
+// degrades to the same list-only layout in every mode.
 //
+// This absorbs previewFits' old arithmetic into the wide arm's PreviewShown
+// line below (see TestLayoutGeomWidePreviewShownThresholdIsExactlyHeight15
+// for the boundary that standalone function used to pin directly).
 // viewport.View() at Height 0 still emits ONE line (lipgloss treats Height(0)
-// as unset — see previewBodyHeight), so the pane's interior needs room for
-// previewMetadataLines PLUS one more row, or the viewport's single emitted
-// line overruns the pane and MaxHeight clips the pane's own bottom border off
-// the frame — a pane that shows zero lines of the exchange (the entire point
-// of the pane) while ALSO breaking the frame around it. Below that threshold,
-// rendering no preview pane at all is strictly better: see
-// (Model).previewVisible, which both View and handleKey consult so they
-// cannot disagree about whether the pane is on screen.
-//
-// previewMetadataLines is defined in view.go, not here — this stays a pure
-// function of termH so it can be pinned directly
-// (TestPreviewFitsThresholdIsExactlyHeight15) without building a styled frame.
-func previewFits(termH int) bool {
-	return paneInnerHeight(bodyPaneHeight(termH)) >= previewMetadataLines+1
+// as unset — see previewBodyHeight), so a shown preview's interior needs room
+// for previewMetadataLines PLUS one more row, or the viewport's single
+// emitted line overruns the pane and MaxHeight clips the pane's own bottom
+// border off the frame. Below that threshold, rendering no preview pane at
+// all is strictly better: see (Model).previewVisible, which both View and
+// handleKey consult so they cannot disagree about whether the pane is on
+// screen.
+func layoutGeom(mode layoutMode, nSessions, width, height int) paneGeom {
+	paneH := bodyPaneHeight(height)
+	stacked := mode == layoutStacked || (mode == layoutAuto && width < stackBreakpoint)
+	if stacked {
+		g := paneGeom{Stacked: true, ListW: width, PrevW: width}
+		if paneH < stackedListFloor+stackedPreviewFloor {
+			g.ListH = paneH // list-only
+			return g
+		}
+		g.PreviewShown = true
+		// The list asks for its natural size (rows + title + border) and is
+		// clamped between its floor and whatever leaves the preview ITS floor;
+		// the preview takes every remaining row.
+		want := nSessions + 1 + paneBorderH
+		g.ListH = min(max(want, stackedListFloor), paneH-stackedPreviewFloor)
+		g.PrevH = paneH - g.ListH
+		return g
+	}
+	g := paneGeom{ListH: paneH, PrevH: paneH}
+	g.ListW, g.PrevW = paneWidths(width)
+	g.PreviewShown = paneInnerHeight(paneH) >= previewMetadataLines+1
+	if !g.PreviewShown {
+		g.ListW = width // list-only draws at the full terminal width
+	}
+	return g
 }

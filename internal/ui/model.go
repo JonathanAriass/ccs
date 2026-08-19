@@ -56,6 +56,7 @@ type Model struct {
 
 	focus   focusArea      // which pane j/k move
 	preview viewport.Model // scrolls the last exchange only; metadata stays pinned
+	layout  layoutMode     // v cycles auto -> stacked -> side-by-side; auto follows width
 
 	names     map[string]string // sessionId -> user override; ccs's own file, never the registry
 	namesFile string
@@ -81,7 +82,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 // previewVisible reports whether the preview pane is rendered at all at the
-// model's current terminal height.
+// model's current layout, terminal width, and terminal height.
 //
 // This is the SINGLE shared source View and handleKey both consult — View to
 // decide whether to draw a second pane at all, handleKey to decide whether
@@ -90,9 +91,9 @@ func (m Model) Init() tea.Cmd {
 // agreement (e.g. a resize that leaves m.focus pointed at focusPreview while
 // the pane it names is no longer on screen); consulting one predicate from
 // both places makes that impossible rather than merely unlikely. See
-// previewFits for the threshold itself.
+// layoutGeom for the geometry itself.
 func (m Model) previewVisible() bool {
-	return previewFits(m.height)
+	return layoutGeom(m.layout, len(m.views), m.width, m.height).PreviewShown
 }
 
 // selected returns the highlighted session, or nil when the list is empty.
@@ -112,13 +113,13 @@ func (m *Model) selected() *session.View {
 // but entry is a door, not an invariant: m.renaming survives every message
 // after it, and two different messages can invalidate the surface the input
 // is drawn on without ever touching m.renaming themselves.
-//   - tea.WindowSizeMsg: shrinking below previewFits' threshold mid-edit
-//     reaches renderPreview's "no second pane" branch (view.go), which never
-//     calls renderPreviewMetadata — the same invisible modal the entry guard
-//     exists to prevent, just reached through a different door. `q` then
-//     types into a field nothing on screen shows instead of quitting, while
-//     the footer legend (correctly) stops advertising `n rename` — leaving it
-//     lying about what `q` currently does.
+//   - tea.WindowSizeMsg: shrinking below the layout's PreviewShown threshold
+//     mid-edit reaches renderPreview's "no second pane" branch (view.go),
+//     which never calls renderPreviewMetadata — the same invisible modal
+//     the entry guard exists to prevent, just reached through a different
+//     door. `q` then types into a field nothing on screen shows instead of
+//     quitting, while the footer legend (correctly) stops advertising
+//     `n rename` — leaving it lying about what `q` currently does.
 //   - sessionsMsg: every session the poll knows about can exit while one is
 //     mid-rename (reconcile has nothing left to anchor the cursor to), which
 //     hits renderPreview's `v == nil` branch — same defect, rarer trigger.

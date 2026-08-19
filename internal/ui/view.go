@@ -254,7 +254,7 @@ func (m Model) View() string {
 			fmt.Sprintf("Terminal too small\n(need %d×%d)", minTermWidth, minTermHeight))
 	}
 
-	paneH := bodyPaneHeight(m.height) // leave room for the status/legend footer
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
 	// Shared by the preview pane's clock-relative fields (renderPreviewMetadata's
 	// Activity line). renderList still reads its own time.Now() for the list
 	// rows' age column — the two are microseconds apart within one frame, close
@@ -262,19 +262,20 @@ func (m Model) View() string {
 	now := time.Now()
 
 	var body string
-	if !m.previewVisible() {
-		// Below previewFits' threshold the preview pane could show its pinned
-		// metadata but ZERO lines of the actual exchange — which is the whole
-		// point of the pane — while its one phantom viewport line (see
-		// previewFits) also breaks the frame's own border. A pane that renders
-		// nothing useful AND corrupts the frame is strictly worse than no pane
-		// at all, so draw the list alone at the full terminal width: it still
-		// does the tool's primary job (see sessions, press Enter to jump), and
-		// the list itself stays usable well below this threshold — 3 rows at
-		// minTermHeight rising to 8 at height 13, always including the selected
-		// one, with the title saying which of them are on screen (see listWindow
-		// and listTitle). This is also the mode that needs those two most: the
-		// terminal is at its shortest here, so the list is at its most clipped.
+	if !g.PreviewShown {
+		// Below the layout's PreviewShown threshold the preview pane could
+		// show its pinned metadata but ZERO lines of the actual exchange —
+		// which is the whole point of the pane — while its one phantom
+		// viewport line (see layoutGeom) also breaks the frame's own border.
+		// A pane that renders nothing useful AND corrupts the frame is
+		// strictly worse than no pane at all, so draw the list alone at the
+		// full terminal width: it still does the tool's primary job (see
+		// sessions, press Enter to jump), and the list itself stays usable
+		// well below this threshold — 3 rows at minTermHeight rising to 8 at
+		// height 13, always including the selected one, with the title
+		// saying which of them are on screen (see listWindow and listTitle).
+		// This is also the mode that needs those two most: the terminal is
+		// at its shortest here, so the list is at its most clipped.
 		//
 		// The list is always drawn with the "focused" border here: it is the
 		// only interactive pane on screen, so there is nothing for the border
@@ -282,13 +283,11 @@ func (m Model) View() string {
 		// previewVisible's doc comment for why handleKey, not this branch, is
 		// what keeps j/k working regardless of what m.focus says.
 		if m.err != nil {
-			body = m.renderListError(m.width, paneH, listPane)
+			body = m.renderListError(g.ListW, g.ListH, listPane)
 		} else {
-			body = m.renderList(m.width, paneH, listPane)
+			body = m.renderList(g.ListW, g.ListH, listPane)
 		}
 	} else {
-		listW, previewW := paneWidths(m.width)
-
 		lp, pp := listPane, previewPane
 		if m.focus == focusPreview {
 			// The brighter border follows focus.
@@ -297,12 +296,16 @@ func (m Model) View() string {
 
 		var list string
 		if m.err != nil {
-			list = m.renderListError(listW, paneH, lp)
+			list = m.renderListError(g.ListW, g.ListH, lp)
 		} else {
-			list = m.renderList(listW, paneH, lp)
+			list = m.renderList(g.ListW, g.ListH, lp)
 		}
-		preview := m.renderPreview(previewW, paneH, pp, now)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
+		preview := m.renderPreview(g.PrevW, g.PrevH, pp, now)
+		if g.Stacked {
+			body = lipgloss.JoinVertical(lipgloss.Left, list, preview)
+		} else {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
+		}
 	}
 
 	// Both footer lines are hard-clipped to the terminal width.

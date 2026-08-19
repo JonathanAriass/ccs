@@ -51,12 +51,12 @@ func (k keyMap) ShortHelp() []key.Binding {
 	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Rename, k.Quit}
 }
 
-// shortHelpFor is ShortHelp for the layout actually on screen: below
-// previewFits' threshold there is no second pane, so handleKey makes Tab a
-// deliberate no-op — and a legend still advertising "⇥ switch pane" there
-// promises a key that does nothing. On the short terminal where this happens
-// the legend is being elided for width anyway, so the binding is also the one
-// costing room the others could use.
+// shortHelpFor is ShortHelp for the layout actually on screen: below the
+// layout's PreviewShown threshold (layoutGeom) there is no second pane, so
+// handleKey makes Tab a deliberate no-op — and a legend still advertising "⇥
+// switch pane" there promises a key that does nothing. On the short terminal
+// where this happens the legend is being elided for width anyway, so the
+// binding is also the one costing room the others could use.
 //
 // Rename joins Cycle here for the same reason, one step worse: the rename
 // input is drawn inside the preview pane's metadata block (renderPreviewMetadata),
