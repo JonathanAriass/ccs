@@ -1455,41 +1455,44 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 }
 
 // TestLegendSurvivingBindingsAtWidth80 pins the elided legend's exact
-// surviving set at 80 columns — the canonical terminal width, and the exact
+// surviving set at the canonical terminal width (80) AND at 79 — the exact
 // width where Task 2's fix-round review measured a regression: before this
 // commit's `keys.go` changes, the full legend needed 90 columns to fit (a
 // `switch pane` label plus the newest `v layout` binding tacked onto the
-// end), so at 80 the elided legend cut off before reaching `q quit` — the
-// EXIT key had become the casualty of a binding addition that never meant to
-// touch it.
+// end), so at 79 (and 80) the elided legend cut off before reaching `q
+// quit` — the EXIT key had become the casualty of a binding addition that
+// never meant to touch it.
 //
-// The fix (shortened `⇥ switch pane` -> `⇥ pane`, and `Quit` moved ahead of
-// `Layout` in ShortHelp — see that function's own doc comment) means `quit`
-// survives at this width again, and `layout` — the newest, most affordable
-// binding — is the one bubbles drops instead. This test is what makes the
-// NEXT binding addition confront that trade-off deliberately: growing
-// ShortHelp's rendered width without touching this test can silently push
-// `quit` back off the edge, exactly as `Layout`'s addition did the first
-// time, undetected until now.
+// Both widths are load-bearing, not redundant: the fix is two independent
+// changes (shortened `⇥ switch pane` -> `⇥ pane`, and `Quit` moved ahead of
+// `Layout` in ShortHelp — see that function's own doc comment), and they
+// were measured to close the regression at DIFFERENT widths. The reorder
+// alone (label left long) moves quit's survival boundary to 80 — which
+// would leave THIS test green even with the shortening reverted, catching
+// only half the fix. The shortening is what pushes that boundary down to
+// 79, matching base's own pre-Task-2 boundary exactly (base needed 79,
+// too) — so 79 is the width that actually proves the label was shortened,
+// and 80 alone cannot tell the difference.
 func TestLegendSurvivingBindingsAtWidth80(t *testing.T) {
-	const width = 80
-	m := heightSweepModel(liveSessionCount, width, 20) // previewVisible: every binding is a candidate
-	if !m.previewVisible() {
-		t.Fatal("fixture must show the preview so no binding is gated off before the width elision even runs")
-	}
-	lines := strings.Split(visibleText(m.View()), "\n")
-	legend := strings.TrimRight(lines[len(lines)-1], " ")
-
-	if !strings.HasSuffix(legend, "…") {
-		t.Fatalf("width %d: legend must still be eliding at this width (fixture assumption), got %q", width, legend)
-	}
-	for _, want := range []string{"up", "down", "pane", "focus tab", "refresh", "rename", "quit"} {
-		if !strings.Contains(legend, want) {
-			t.Errorf("width %d: legend lost %q, want it to survive: %q", width, want, legend)
+	for _, width := range []int{79, 80} {
+		m := heightSweepModel(liveSessionCount, width, 20) // previewVisible: every binding is a candidate
+		if !m.previewVisible() {
+			t.Fatalf("width %d: fixture must show the preview so no binding is gated off before the width elision even runs", width)
 		}
-	}
-	if strings.Contains(legend, "layout") {
-		t.Errorf("width %d: legend shows \"layout\" — expected it to be the one binding eliding at this width, got %q", width, legend)
+		lines := strings.Split(visibleText(m.View()), "\n")
+		legend := strings.TrimRight(lines[len(lines)-1], " ")
+
+		if !strings.HasSuffix(legend, "…") {
+			t.Fatalf("width %d: legend must still be eliding at this width (fixture assumption), got %q", width, legend)
+		}
+		for _, want := range []string{"up", "down", "pane", "focus tab", "refresh", "rename", "quit"} {
+			if !strings.Contains(legend, want) {
+				t.Errorf("width %d: legend lost %q, want it to survive: %q", width, want, legend)
+			}
+		}
+		if strings.Contains(legend, "layout") {
+			t.Errorf("width %d: legend shows \"layout\" — expected it to be the one binding eliding at this width, got %q", width, legend)
+		}
 	}
 }
 

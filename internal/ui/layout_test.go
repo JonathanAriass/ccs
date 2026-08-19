@@ -403,26 +403,57 @@ func TestLayoutGeomStackedAllocation(t *testing.T) {
 // auto then stacks at 40×20/40×18/89×20, produces genuinely different
 // (Stacked=true) geometry, and every case here reddens on the struct
 // inequality.
+//
+// The last two rows pin stackedComfortHeight's OWN boundary directly (60x23
+// paneH=21, 60x24 paneH=22) — added in the final-review fix wave after
+// mutating "paneH >= stackedComfortHeight" to "paneH > stackedComfortHeight"
+// and separately to "paneH >= stackedComfortHeight-1" both left the suite
+// green: the three rows above sit well clear of the line (paneH 16-18, all
+// >= 3 below 22) the same way the width breakpoint test
+// (TestLayoutGeomAutoBreakpointBothDirections) pins 89/90 exactly rather
+// than merely "somewhere below 90". "> stackedComfortHeight" reddens the
+// 60x24 row (22 > 22 is false, so it wrongly falls through to wide); ">=
+// stackedComfortHeight-1" reddens the 60x23 row (21 >= 21 is true, so it
+// wrongly stacks).
 func TestLayoutGeomAutoStacksOnlyWhenComfortable(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		nSessions int
-		width, h  int
+		name        string
+		nSessions   int
+		width, h    int
+		wantStacked bool
 	}{
-		{"40x20: the regression's own fixture (paneH=18, comfort needs 22)", 15, 40, 20},
-		{"40x18: further below comfort", 15, 40, 18},
-		{"89x20: right at the breakpoint's width edge, still uncomfortable", 15, 89, 20},
+		{"40x20: the regression's own fixture (paneH=18, comfort needs 22)", 15, 40, 20, false},
+		{"40x18: further below comfort", 15, 40, 18, false},
+		{"89x20: right at the breakpoint's width edge, still uncomfortable", 15, 89, 20, false},
+		{"60x23: one row below the comfort boundary (paneH=21)", 15, 60, 23, false},
+		{"60x24: exactly at the comfort boundary (paneH=22)", 15, 60, 24, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			auto := layoutGeom(layoutAuto, tc.nSessions, tc.width, tc.h)
-			wide := layoutGeom(layoutWide, tc.nSessions, tc.width, tc.h)
-			if auto != wide {
-				t.Errorf("auto=%+v\nwide=%+v\nauto must fall back to the wide rules exactly below stackedComfortHeight (%d)",
-					auto, wide, stackedComfortHeight)
+
+			if auto.Stacked != tc.wantStacked {
+				t.Errorf("auto.Stacked=%v, want %v (paneH=%d, stackedComfortHeight=%d)",
+					auto.Stacked, tc.wantStacked, bodyPaneHeight(tc.h), stackedComfortHeight)
 			}
-			if auto.Stacked {
-				t.Errorf("auto stacked at an uncomfortable height (paneH=%d < %d)",
-					bodyPaneHeight(tc.h), stackedComfortHeight)
+
+			if !tc.wantStacked {
+				wide := layoutGeom(layoutWide, tc.nSessions, tc.width, tc.h)
+				if auto != wide {
+					t.Errorf("auto=%+v\nwide=%+v\nauto must fall back to the wide rules exactly below stackedComfortHeight (%d)",
+						auto, wide, stackedComfortHeight)
+				}
+				return
+			}
+
+			// Once auto decides to stack, its geometry must be identical to
+			// forced-stacked at the same size — the single-resolver
+			// discipline layoutGeom's own doc comment describes, checked
+			// from the auto side the way the not-comfortable branch above
+			// checks it from the wide side.
+			stacked := layoutGeom(layoutStacked, tc.nSessions, tc.width, tc.h)
+			if auto != stacked {
+				t.Errorf("auto=%+v\nstacked=%+v\nauto must match forced-stacked geometry exactly once it decides to stack",
+					auto, stacked)
 			}
 		})
 	}
@@ -448,16 +479,32 @@ func TestLayoutGeomAutoStackedPreviewMeetsItsTarget(t *testing.T) {
 // today's geometry exactly: paneWidths' split, full pane height on both
 // sides, and PreviewShown following the same arithmetic previewFits used —
 // this arm is what previewFits' logic became, so the two must agree.
+//
+// h=8 and h=14 exercise the list-only branch (PreviewShown false); h=15 and
+// h=30 exercise the two-pane branch. Both branches get their own geometry
+// assertion below — added in the final-review fix wave after the reviewer
+// found the ORIGINAL version of this test asserted geometry only inside
+// `if g.PreviewShown`, so the list-only branch's `g.ListW = width` (the
+// wide arm's own "list-only draws at the full terminal width" line,
+// layout.go) was never checked at all: deleting it left the suite green.
 func TestLayoutGeomWideMatchesTheOldRule(t *testing.T) {
+	const width = 118
 	for _, h := range []int{8, 14, 15, 30} {
-		g := layoutGeom(layoutWide, 5, 118, h)
-		lw, pw := paneWidths(118)
+		g := layoutGeom(layoutWide, 5, width, h)
+		lw, pw := paneWidths(width)
 		wantShown := paneInnerHeight(bodyPaneHeight(h)) >= previewMetadataLines+1
 		if g.PreviewShown != wantShown {
 			t.Errorf("h=%d PreviewShown=%v want %v", h, g.PreviewShown, wantShown)
 		}
-		if g.PreviewShown && (g.ListW != lw || g.PrevW != pw || g.ListH != bodyPaneHeight(h) || g.PrevH != bodyPaneHeight(h)) {
-			t.Errorf("h=%d wide geom diverges from the old rule: %+v", h, g)
+		if g.PreviewShown {
+			if g.ListW != lw || g.PrevW != pw || g.ListH != bodyPaneHeight(h) || g.PrevH != bodyPaneHeight(h) {
+				t.Errorf("h=%d wide geom diverges from the old rule: %+v", h, g)
+			}
+			continue
+		}
+		if g.ListW != width || g.ListH != bodyPaneHeight(h) {
+			t.Errorf("h=%d list-only wide geom: ListW=%d ListH=%d, want %d,%d (list-only must draw at the full terminal width)",
+				h, g.ListW, g.ListH, width, bodyPaneHeight(h))
 		}
 	}
 }
