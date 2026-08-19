@@ -320,21 +320,48 @@ func TestLayoutGeomForcedIgnoresWidth(t *testing.T) {
 // false and the list takes the whole pane), and the two heights sum to
 // EXACTLY the pane budget — no gap a border could leave uncovered, no
 // overlap that would double-draw a row.
+// TestLayoutGeomStackedAllocation pins the amended (2026-08-19) allocation
+// exactly, not just its floors: the preview meets its TARGET
+// (stackedPreviewWant) first, the list then grows to its natural size out of
+// whatever room that leaves (never below its own floor, never above natural
+// size), and any room beyond BOTH goes back to the preview.
+//
+// wantListH/wantPrevH are an independent, hand-computed oracle (verified
+// against a standalone scratch program, not re-derived from the resolver
+// under test) — deliberately literal rather than re-derived from
+// stackedPreviewWant/stackedListFloor here, the same way the file's other
+// exact-boundary tables (e.g. the height-15 boundary test) pin a number
+// rather than the formula that produces it. -1 means list-only (PreviewShown
+// false).
 func TestLayoutGeomStackedAllocation(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		nSessions, h int
+		name                 string
+		nSessions, h         int
+		wantListH, wantPrevH int
 	}{
-		{"tall, few sessions", 1, 40},
-		{"tall, many sessions", 30, 40},
-		{"exactly at the stacked floor", 5, 20}, // paneH=18 = 5+13
-		{"one below the stacked floor", 5, 19},  // paneH=17 -> list-only
-		{"list-only heights keep working", 5, 12},
+		// natural size (1+3=4) is below the list floor (5): the floor wins,
+		// and the preview absorbs essentially the whole pane.
+		{"few sessions: list pinned to its floor, preview absorbs the rest", 1, 40, 5, 33},
+		// natural size (3+3=6) fits comfortably inside the room left after
+		// the preview's want (38-17=21): list gets its natural 6, preview
+		// absorbs the 15-row surplus above its own want (17).
+		{"list reaches its natural size, preview absorbs the surplus", 3, 40, 6, 32},
+		// natural size (30+3=33) EXCEEDS the room left after the preview's
+		// want (38-17=21): the preview is protected at exactly its want
+		// (17) regardless of how many sessions are asking for list rows —
+		// this is the case the pre-amendment formula got backwards.
+		{"many sessions: preview still gets exactly its want, not squeezed to its floor", 30, 40, 21, 17},
+		// exactly at the bare stacked floor (forced mode only — auto's
+		// comfort gate keeps auto away from this height entirely): both
+		// panes sit at their bare floors, not their wants.
+		{"exactly at the bare stacked floor", 5, 20, 5, 13},
+		{"one below the bare floor: list-only", 5, 19, -1, -1}, // paneH=17
+		{"list-only heights keep working", 5, 12, -1, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := layoutGeom(layoutStacked, tc.nSessions, 60, tc.h)
 			paneH := bodyPaneHeight(tc.h)
-			wantShown := paneH >= 18
+			wantShown := tc.wantListH != -1
 			if g.PreviewShown != wantShown {
 				t.Fatalf("PreviewShown=%v want %v (paneH=%d)", g.PreviewShown, wantShown, paneH)
 			}
@@ -347,16 +374,73 @@ func TestLayoutGeomStackedAllocation(t *testing.T) {
 			if g.ListW != 60 || g.PrevW != 60 {
 				t.Errorf("stacked panes must be full width: %d,%d", g.ListW, g.PrevW)
 			}
-			if g.ListH < 5 {
-				t.Errorf("ListH=%d below the 5-row floor", g.ListH)
+			if g.ListH != tc.wantListH || g.PrevH != tc.wantPrevH {
+				t.Errorf("ListH=%d PrevH=%d, want %d,%d", g.ListH, g.PrevH, tc.wantListH, tc.wantPrevH)
 			}
-			if g.PrevH < 13 {
-				t.Errorf("PrevH=%d below the 13-row preview floor", g.PrevH)
+			if g.ListH < stackedListFloor {
+				t.Errorf("ListH=%d below the %d-row floor", g.ListH, stackedListFloor)
+			}
+			if g.PrevH < stackedPreviewFloor {
+				t.Errorf("PrevH=%d below the %d-row preview floor", g.PrevH, stackedPreviewFloor)
 			}
 			if g.ListH+g.PrevH != paneH {
 				t.Errorf("ListH+PrevH=%d != paneH=%d", g.ListH+g.PrevH, paneH)
 			}
 		})
+	}
+}
+
+// TestLayoutGeomAutoStacksOnlyWhenComfortable is the amendment's central
+// no-regression claim, pinned directly: auto mode must never render a
+// STACKED frame that is worse than the side-by-side rules would have given
+// the same size — and the way it keeps that promise is by not stacking at
+// all below stackedComfortHeight, falling through to the exact same wide-arm
+// code path layoutWide uses. That fallthrough is what makes these pairs
+// identical, not merely similar: at an uncomfortable height, auto and wide
+// run the SAME branch with the SAME inputs.
+//
+// Mutation: delete the "&& paneH >= stackedComfortHeight" comfort check —
+// auto then stacks at 40×20/40×18/89×20, produces genuinely different
+// (Stacked=true) geometry, and every case here reddens on the struct
+// inequality.
+func TestLayoutGeomAutoStacksOnlyWhenComfortable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		nSessions int
+		width, h  int
+	}{
+		{"40x20: the regression's own fixture (paneH=18, comfort needs 22)", 15, 40, 20},
+		{"40x18: further below comfort", 15, 40, 18},
+		{"89x20: right at the breakpoint's width edge, still uncomfortable", 15, 89, 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auto := layoutGeom(layoutAuto, tc.nSessions, tc.width, tc.h)
+			wide := layoutGeom(layoutWide, tc.nSessions, tc.width, tc.h)
+			if auto != wide {
+				t.Errorf("auto=%+v\nwide=%+v\nauto must fall back to the wide rules exactly below stackedComfortHeight (%d)",
+					auto, wide, stackedComfortHeight)
+			}
+			if auto.Stacked {
+				t.Errorf("auto stacked at an uncomfortable height (paneH=%d < %d)",
+					bodyPaneHeight(tc.h), stackedComfortHeight)
+			}
+		})
+	}
+}
+
+// TestLayoutGeomAutoStackedPreviewMeetsItsTarget pins the amendment's other
+// headline number: a COMFORTABLE auto-stacked frame gives the preview at
+// least its target (stackedPreviewWant), not merely its bare floor.
+func TestLayoutGeomAutoStackedPreviewMeetsItsTarget(t *testing.T) {
+	g := layoutGeom(layoutAuto, 3, 60, 40)
+	if !g.Stacked {
+		t.Fatal("fixture: 60x40 must stack in auto (comfortable, width < breakpoint)")
+	}
+	if !g.PreviewShown {
+		t.Fatal("fixture: 60x40 must show the preview")
+	}
+	if g.PrevH < stackedPreviewWant {
+		t.Errorf("PrevH=%d, want >= stackedPreviewWant (%d)", g.PrevH, stackedPreviewWant)
 	}
 }
 

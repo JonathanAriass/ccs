@@ -976,8 +976,8 @@ func TestEnterJumpsRegardlessOfFocus(t *testing.T) {
 // mutants at once.
 func TestPreviewMetadataLineCountMatchesTheConstant(t *testing.T) {
 	m := modelWithOverflowingPreview(t, 1)
-	_, previewW := paneWidths(m.width)
-	innerW := paneInnerWidth(previewW)
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	innerW := paneInnerWidth(g.PrevW)
 
 	for _, c := range []struct {
 		name       string
@@ -1153,6 +1153,107 @@ func TestJAndKDoNotScrollAnInvisiblePreview(t *testing.T) {
 			}
 			if m.preview.YOffset != startOffset {
 				t.Errorf("preview YOffset changed from %d to %d — %s scrolled a pane nothing on screen shows",
+					startOffset, m.preview.YOffset, c.name)
+			}
+		})
+	}
+}
+
+// shrunkBelowTheStackedPreviewThreshold is
+// shrunkBelowThePreviewThreshold's forced-stacked counterpart (fix-round
+// I2): same dead-key hazard, but crossing the STACKED arm's own bare-floor
+// height threshold (paneH >= 18) rather than the wide arm's (paneH >= 13) —
+// a door shrunkBelowThePreviewThreshold's fixed wide width never reaches. See
+// TestRenameExitsWhenForcedStackedResizedBelowItsOwnFloor's comment for why
+// this is the one door left uncovered under the current arithmetic.
+func shrunkBelowTheStackedPreviewThreshold(t *testing.T, cursor int) Model {
+	t.Helper()
+	m := modelWithOverflowingPreview(t, 3)
+	m.layout = layoutStacked
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 21}) // paneH=19, shown
+	m = next.(Model)
+	if !m.previewVisible() {
+		t.Fatal("fixture: preview must be visible at 60x21 stacked (paneH=19 >= 18)")
+	}
+	m = scrolledPreview(t, m, 3)
+	m.cursor = cursor
+	m.focus = focusPreview
+
+	next, _ = m.Update(tea.WindowSizeMsg{Width: 60, Height: 19}) // paneH=17, below the stacked floor (18)
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at 60x19 stacked (paneH=17 < 18)")
+	}
+	if m.focus != focusPreview {
+		t.Fatal("fixture: focus must still read focusPreview after the resize — a resize does not touch m.focus")
+	}
+	if m.preview.YOffset == 0 {
+		t.Fatal("fixture: the viewport must still be scrolled after the resize")
+	}
+	return m
+}
+
+// TestJAndKDoNotFreezeAfterForcedStackedShrinksBelowItsOwnFloor is
+// TestJAndKDoNotFreezeAfterShrinkingBelowThePreviewThreshold's forced-stacked
+// counterpart, for the door the original cannot reach (see
+// shrunkBelowTheStackedPreviewThreshold). Same shape, same reasoning: each
+// direction starts from a cursor that CAN move that way.
+func TestJAndKDoNotFreezeAfterForcedStackedShrinksBelowItsOwnFloor(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        tea.KeyMsg
+		start, end int
+	}{
+		{"j", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, 0, 1},
+		{"k", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, 2, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shrunkBelowTheStackedPreviewThreshold(t, c.start)
+
+			next, _ := m.Update(c.key)
+			m = next.(Model)
+
+			if m.cursor != c.end {
+				t.Errorf("cursor = %d after %s with an invisible (stacked) preview focused, want %d — "+
+					"the list must move regardless of m.focus", m.cursor, c.name, c.end)
+			}
+		})
+	}
+}
+
+// TestJAndKDoNotScrollAnInvisibleStackedPreview is
+// TestJAndKDoNotScrollAnInvisiblePreview's forced-stacked counterpart. It
+// needs its own, DIFFERENT cursor positions from the freeze test above — a
+// cursor that MOVES triggers syncPreview()+GotoTop(), which parks the
+// viewport at 0 regardless of any stray LineUp/LineDown on the way, masking
+// a phantom scroll rather than revealing one (and would make the checks
+// below false-positive against CORRECT code, since the fixture guarantees a
+// nonzero starting offset). Starting at the boundary for each direction
+// makes the cursor move a no-op, so nothing resets the viewport.
+func TestJAndKDoNotScrollAnInvisibleStackedPreview(t *testing.T) {
+	cases := []struct {
+		name   string
+		key    tea.KeyMsg
+		cursor int
+	}{
+		{"j", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, 2}, // already at the bottom
+		{"k", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, 0}, // already at the top
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := shrunkBelowTheStackedPreviewThreshold(t, c.cursor)
+			startOffset := m.preview.YOffset
+
+			next, _ := m.Update(c.key)
+			m = next.(Model)
+
+			if m.cursor != c.cursor {
+				t.Fatalf("cursor = %d, want unchanged at the boundary %d — the fixture must actually be blocked",
+					m.cursor, c.cursor)
+			}
+			if m.preview.YOffset != startOffset {
+				t.Errorf("preview YOffset changed from %d to %d — %s scrolled a stacked pane nothing on screen shows",
 					startOffset, m.preview.YOffset, c.name)
 			}
 		})
@@ -1641,6 +1742,58 @@ func TestRenameExitsWhenResizedBelowThreshold(t *testing.T) {
 	}
 	if m.renaming {
 		t.Error("rename mode survived a resize below the preview threshold — the invisible modal is back")
+	}
+
+	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if quitCmd == nil {
+		t.Fatal("q must return a command")
+	}
+	if _, ok := quitCmd().(tea.QuitMsg); !ok {
+		t.Error("q must quit once the resize has closed the no-longer-visible rename mode")
+	}
+}
+
+// TestRenameExitsWhenForcedStackedResizedBelowItsOwnFloor is
+// TestRenameExitsWhenResizedBelowThreshold's stacked-mode counterpart
+// (fix-round I2). previewVisible() became width- AND layout-sensitive with
+// the resolver, but that test only ever crosses the WIDE arm's own height
+// threshold (13) at a fixed wide width — it cannot see a previewVisible()
+// that ignores m.layout entirely, because at its fixed width the wide
+// arithmetic is what's actually in effect either way.
+//
+// A genuine, layout-sensitive door needs the STACKED arm's OWN threshold,
+// which is a different height (paneH >= 18, not >= 13) reachable only in
+// stacked mode. Verified by exhaustive probe over widths 40-200 x heights
+// 8-60 (see the fix-round report): under the current arithmetic there is no
+// WIDTH-only door left in auto mode at all — auto's own stacking decision
+// requires a comfortable height (paneH >= 22), and at every comfortable
+// height both the wide and stacked arms already show the preview, so a
+// width-only resize can change WHICH arm is in effect without ever changing
+// PreviewShown. The one remaining, newly-reachable door is FORCED stacked's
+// own bare-floor height crossing, pinned here: 60x21 (paneH=19, shown) to
+// 60x19 (paneH=17, hidden).
+func TestRenameExitsWhenForcedStackedResizedBelowItsOwnFloor(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 1)
+	m.layout = layoutStacked
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 21})
+	m = n.(Model)
+	if !m.previewVisible() {
+		t.Fatal("fixture: preview must be visible at 60x21 stacked (paneH=19 >= 18)")
+	}
+
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	if !m.renaming {
+		t.Fatal("fixture: n did not enter rename mode")
+	}
+
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 19}) // paneH=17, below the stacked floor (18)
+	m = next.(Model)
+	if m.previewVisible() {
+		t.Fatal("fixture: preview must NOT be visible at 60x19 stacked (paneH=17 < 18)")
+	}
+	if m.renaming {
+		t.Error("rename mode survived a resize below the STACKED preview threshold — the invisible modal is back, reached through the layout axis previewVisible() reverting to height-only arithmetic would miss")
 	}
 
 	_, quitCmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})

@@ -413,11 +413,41 @@ type paneGeom struct {
 // stackedPreviewFloor is the smallest OUTER height a stacked preview pane is
 // worth drawing at: previewMetadataLines interior rows + 1 exchange line +
 // the border. Below it the pane shows metadata and zero exchange — worse than
-// no pane (see the list-only rationale in View).
+// no pane (see the list-only rationale in View). "1 exchange line" is a
+// literal line of viewport, not a literal line of MESSAGE TEXT: at this exact
+// floor the viewport's one body row is spent on the "Last human:" label
+// itself, so a stacked preview AT its floor still shows zero characters of
+// the actual exchange. Same behaviour the pre-stacking wide arm always had at
+// its own threshold (previewMetadataLines+1) — inherited, not introduced
+// here. stackedPreviewWant exists precisely to keep auto out of this floor.
 const stackedPreviewFloor = previewMetadataLines + 1 + paneBorderH // 13
 
-// stackedListFloor keeps the list useful when stacked: 3 rows + title + border.
+// stackedPreviewWant is the preview's TARGET outer height when stacked, not
+// merely its floor: stackedPreviewFloor's one body row is spent entirely on
+// the "Last human:" label (see its comment) — this adds four more rows so a
+// comfortably-sized stacked preview shows some actual exchange text, not just
+// metadata. layoutGeom's allocation gives the preview this many rows before
+// the list grows past its own floor, and lets the preview absorb any surplus
+// once the list has reached its natural size.
+const stackedPreviewWant = stackedPreviewFloor + 4 // 17
+
+// stackedListFloor keeps the list useful when stacked: 2 rows + title + border.
 const stackedListFloor = 5
+
+// stackedComfortHeight is the smallest paneH at which AUTO mode is willing to
+// stack: enough for the list's floor AND the preview's TARGET (not just its
+// floor), so auto never renders a stacked frame that is worse than side-by-
+// side would have been at the same size. See the amended design doc
+// (2026-08-19 amendment) for the regression this closes: the original
+// formula gave the preview priority up to its floor from the WIDTH budget's
+// upper bound, which squeezed the list to its floor even with 15 sessions —
+// at 40×20 that meant 2 list rows and ZERO exchange lines, worse than the
+// pre-feature side-by-side render of the same frame (15 rows, 5 lines). Below
+// this height auto falls through to the side-by-side rules unconditionally —
+// cramped but exactly today's behaviour, never a new regression. FORCED
+// stacked (the user explicitly asked for it via `v`) still works all the way
+// down to stackedListFloor+stackedPreviewFloor, same as before.
+const stackedComfortHeight = stackedListFloor + stackedPreviewWant // 22
 
 // layoutGeom resolves the pane geometry for a frame. A forced mode is a
 // preference, not a command: geometry constraints (the stacked floor, the
@@ -437,19 +467,28 @@ const stackedListFloor = 5
 // screen.
 func layoutGeom(mode layoutMode, nSessions, width, height int) paneGeom {
 	paneH := bodyPaneHeight(height)
-	stacked := mode == layoutStacked || (mode == layoutAuto && width < stackBreakpoint)
+	stacked := mode == layoutStacked ||
+		(mode == layoutAuto && width < stackBreakpoint && paneH >= stackedComfortHeight)
 	if stacked {
 		g := paneGeom{Stacked: true, ListW: width, PrevW: width}
 		if paneH < stackedListFloor+stackedPreviewFloor {
 			g.ListH = paneH // list-only
+			g.PrevH = paneH // undrawn; mirrors the wide list-only arm below so
+			// syncPreview sizes the (hidden) viewport consistently in both modes
 			return g
 		}
 		g.PreviewShown = true
-		// The list asks for its natural size (rows + title + border) and is
-		// clamped between its floor and whatever leaves the preview ITS floor;
-		// the preview takes every remaining row.
-		want := nSessions + 1 + paneBorderH
-		g.ListH = min(max(want, stackedListFloor), paneH-stackedPreviewFloor)
+		// The preview meets its TARGET first (stackedPreviewWant): that is
+		// the room left for the list once the preview has taken what it
+		// wants. The list then grows to its natural size (rows + title +
+		// border) out of that room, clamped so it never drops below its own
+		// floor even when natural size is smaller (few sessions) and never
+		// grows past it when there's more room than the list needs — any
+		// room beyond both floors/wants goes to the preview, which is what
+		// lets it absorb surplus rather than the list soaking it up.
+		natural := nSessions + 1 + paneBorderH
+		listCap := max(natural, stackedListFloor) // never let the cap fall below the floor
+		g.ListH = min(max(paneH-stackedPreviewWant, stackedListFloor), listCap)
 		g.PrevH = paneH - g.ListH
 		return g
 	}

@@ -81,6 +81,17 @@ func sizedModel(n, width, height int) Model {
 // characters a terminal would actually place on the grid.
 func visibleText(s string) string { return ansi.Strip(s) }
 
+// indexOfLineContaining returns the index of the first line in frame whose
+// visible text contains substr, or -1 if no line does.
+func indexOfLineContaining(frame, substr string) int {
+	for i, ln := range strings.Split(frame, "\n") {
+		if strings.Contains(visibleText(ln), substr) {
+			return i
+		}
+	}
+	return -1
+}
+
 // titleOf extracts the preview pane's title line directly from
 // renderPreviewMetadata, rather than substring-matching the whole joined
 // frame. A whole-frame substring search for e.g. "1/" would also match a CWD
@@ -261,8 +272,8 @@ func TestHandEditedNamesJSONIsSanitizedAtRender(t *testing.T) {
 	// TestFormatRowIsAlwaysExactlyOneLine and
 	// TestListPaneDrawsExactlyOneRowPerSession pin for transcript-derived
 	// fields.
-	listW, _ := paneWidths(m.width)
-	pane := m.renderList(listW, bodyPaneHeight(m.height), listPane)
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	pane := m.renderList(g.ListW, g.ListH, listPane)
 	lines := listPaneContentLines(pane)
 	if len(lines) != 2 { // title + exactly one row
 		t.Fatalf("list pane drew %d content lines for 1 session with a hostile override, want 2 (title + one row):\n%s",
@@ -369,8 +380,8 @@ func TestViewDimsRowsWithNoTTY(t *testing.T) {
 	// Render the LIST pane only (not the full View()): the preview pane's own
 	// border also happens to use color 240, same as dimRow, and would
 	// otherwise contaminate a substring search over the full joined frame.
-	listW, _ := paneWidths(m.width)
-	raw := m.renderList(listW, bodyPaneHeight(m.height), listPane)
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	raw := m.renderList(g.ListW, g.ListH, listPane)
 
 	dimANSI := dimRow.Render("z") // capture this style's actual escape prefix
 	dimPrefix := dimANSI[:strings.Index(dimANSI, "z")]
@@ -712,20 +723,19 @@ func TestListPaneDrawsExactlyOneRowPerSession(t *testing.T) {
 	next, _ = m.Update(sessionsMsg{views: views})
 	m = next.(Model)
 
-	listW, _ := paneWidths(w)
-	paneH := bodyPaneHeight(h)
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
 	// The pane must have room to DRAW the extra lines, or the bug would be
 	// hidden by the same MaxHeight clipping that would otherwise cost it its
 	// bottom border, and the count below would come out right for the wrong
 	// reason.
-	if room, need := paneInnerHeight(paneH), 1+4*n; room < need {
+	if room, need := paneInnerHeight(g.ListH), 1+4*n; room < need {
 		t.Fatalf("pane interior is %d rows; a multi-line render needs up to %d to be visible at all", room, need)
 	}
-	if got := listCapacity(paneH); got < n {
+	if got := listCapacity(g.ListH); got < n {
 		t.Fatalf("list capacity is %d rows, fewer than the %d sessions — some would be windowed out", got, n)
 	}
 
-	pane := m.renderList(listW, paneH, listPane)
+	pane := m.renderList(g.ListW, g.ListH, listPane)
 	lines := listPaneContentLines(pane)
 	if len(lines) != n+1 {
 		t.Fatalf("list pane drew %d content lines, want %d (one title + one row per session):\n%s",
@@ -771,10 +781,24 @@ func TestViewTerminalTooSmall(t *testing.T) {
 }
 
 // TestViewportHeightMatchesRenderedPreviewInBothLayouts pins the resolver's
-// whole reason to exist: syncPreview and View must derive the SAME preview
-// geometry. Mutation: let either consumer compute its own (e.g. syncPreview
-// reverting to bodyPaneHeight(m.height)) — this reddens in the stacked case,
-// where pane height != full height for the first time.
+// whole reason to exist: syncPreview AND View must derive the SAME preview
+// geometry, checked from BOTH sides.
+//
+//   - syncPreview side: the viewport's own Height field must match what the
+//     resolver says. Mutation: syncPreview reverting to bodyPaneHeight(m.height)
+//     — this reddens in the stacked case, where pane height != full height for
+//     the first time.
+//   - View side: the RENDERED preview pane, in the stacked case, must
+//     actually occupy g.PrevH rows on screen — found and measured by locating
+//     its top/bottom border lines at the row offsets g.ListH and
+//     g.ListH+g.PrevH-1. Without this half, a View that computes its own
+//     (different) height for the call to renderPreview — e.g.
+//     renderPreview(g.PrevW, bodyPaneHeight(m.height), ...), the exact drift
+//     this resolver exists to make impossible — passes the syncPreview-side
+//     check above untouched, since that check never renders anything. Wide
+//     mode is not rendered here: g.PrevH == bodyPaneHeight(m.height) always
+//     in the wide arm (by construction — see layoutGeom), so that mutation is
+//     a no-op there and this half is only meaningful in the stacked case.
 func TestViewportHeightMatchesRenderedPreviewInBothLayouts(t *testing.T) {
 	for _, mode := range []layoutMode{layoutWide, layoutStacked} {
 		m := modelWithOverflowingPreview(t, 3)
@@ -789,6 +813,25 @@ func TestViewportHeightMatchesRenderedPreviewInBothLayouts(t *testing.T) {
 		if m.preview.Height != want {
 			t.Errorf("mode %v: viewport Height=%d, resolver says %d", mode, m.preview.Height, want)
 		}
+
+		if mode != layoutStacked {
+			continue
+		}
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) <= g.ListH+g.PrevH-1 {
+			t.Fatalf("mode %v: frame has only %d lines, want at least %d (g.ListH+g.PrevH)",
+				mode, len(lines), g.ListH+g.PrevH)
+		}
+		top := visibleText(lines[g.ListH])
+		bottom := visibleText(lines[g.ListH+g.PrevH-1])
+		if !strings.HasPrefix(top, "╭") {
+			t.Errorf("mode %v: expected the preview pane's top border at line %d (right after the list's %d rows), got %q — the rendered preview pane does not start where g.ListH says it should",
+				mode, g.ListH, g.ListH, top)
+		}
+		if !strings.HasPrefix(bottom, "╰") {
+			t.Errorf("mode %v: expected the preview pane's bottom border at line %d, got %q — the rendered preview pane is not exactly g.PrevH=%d rows tall",
+				mode, g.ListH+g.PrevH-1, bottom, g.PrevH)
+		}
 	}
 }
 
@@ -797,9 +840,26 @@ func TestViewportHeightMatchesRenderedPreviewInBothLayouts(t *testing.T) {
 // sweeps (which sweep layoutWide too, and so would still pass if the stacked
 // arm quietly kept lipgloss.JoinHorizontal — every pane would still be
 // present and every line still bounded, just arranged side by side instead
-// of stacked). The list pane's bottom border must be ABOVE the preview
-// pane's top border in the rendered frame: that ordering is JoinVertical's
-// signature and JoinHorizontal cannot produce it.
+// of stacked).
+//
+// Two checks, each catching a mutation the other misses:
+//
+//   - The list pane's own title ("Sessions") must appear on an earlier line
+//     than the preview pane's own metadata ("Status:") — anchored on PANE
+//     IDENTITY, not border glyphs alone, so a JoinVertical with the panes'
+//     ARGUMENT ORDER inverted (preview above list) reddens here. A
+//     border-glyph-only check (the previous version of this test: first ╰
+//     before first ╭) cannot tell "list above preview" from "preview above
+//     list" — both orderings satisfy "some bottom border precedes some top
+//     border" — which is exactly how that version passed unchanged under a
+//     JoinVertical(preview, list) mutation.
+//   - Exactly two lines start with a top-left corner (╭) at column 0. In a
+//     horizontal join the two panes' top borders share the SAME row (pasted
+//     side by side), so JoinHorizontal produces exactly ONE such line; a
+//     vertical join produces one per pane. This is the positive signature a
+//     glyph-COUNT check gives that presence-of-order alone does not — it is
+//     what still kills a reintroduced JoinHorizontal even if some future
+//     change made "Sessions"/"Status:" collide on identity.
 func TestStackedFrameJoinsTheListAboveThePreview(t *testing.T) {
 	m := modelWithOverflowingPreview(t, 3)
 	m.layout = layoutStacked
@@ -809,26 +869,29 @@ func TestStackedFrameJoinsTheListAboveThePreview(t *testing.T) {
 		t.Fatal("fixture must show the preview")
 	}
 
-	lines := strings.Split(m.View(), "\n")
-	listBottom, previewTop := -1, -1
-	for i, ln := range lines {
-		plain := visibleText(ln)
-		switch {
-		case strings.HasPrefix(plain, "╰") && listBottom == -1:
-			listBottom = i
-		case strings.HasPrefix(plain, "╭") && listBottom != -1 && previewTop == -1:
-			previewTop = i
+	frame := m.View()
+	sessionsLine := indexOfLineContaining(frame, "Sessions")
+	statusLine := indexOfLineContaining(frame, "Status:")
+	if sessionsLine == -1 {
+		t.Fatalf("no list pane title (\"Sessions\") found in frame:\n%s", frame)
+	}
+	if statusLine == -1 {
+		t.Fatalf("no preview pane metadata (\"Status:\") found in frame:\n%s", frame)
+	}
+	if sessionsLine >= statusLine {
+		t.Errorf("list pane's title (line %d) is not above the preview pane's metadata (line %d) — stacked arm is not joining the list above the preview:\n%s",
+			sessionsLine, statusLine, frame)
+	}
+
+	openCorners := 0
+	for _, ln := range strings.Split(frame, "\n") {
+		if strings.HasPrefix(visibleText(ln), "╭") {
+			openCorners++
 		}
 	}
-	if listBottom == -1 {
-		t.Fatalf("no list pane bottom border (╰) found in frame:\n%s", m.View())
-	}
-	if previewTop == -1 {
-		t.Fatalf("no preview pane top border (╭) found after the list pane's bottom border:\n%s", m.View())
-	}
-	if listBottom >= previewTop {
-		t.Errorf("list pane's bottom border (line %d) is not above the preview pane's top border (line %d) — stacked arm is not joining vertically:\n%s",
-			listBottom, previewTop, m.View())
+	if openCorners != 2 {
+		t.Errorf("frame has %d lines starting with a top-left corner (╭), want exactly 2 — one pane's top border per row means a vertical join, not a horizontal one:\n%s",
+			openCorners, frame)
 	}
 }
 
@@ -1004,6 +1067,14 @@ func TestPreviewTitleKeepsBothAffordancesAtEveryWidth(t *testing.T) {
 	for _, focus := range []focusArea{focusList, focusPreview} {
 		for w := minTermWidth; w <= 80; w++ {
 			m := widthSweepModel(w, 20)
+			// Forced wide, not auto: below stackBreakpoint auto now stacks
+			// (full terminal width), which would move this sweep out of the
+			// 12-28 column interior band previewTitle's degradation ladder
+			// is written for — the whole reason this sweep exists. Task 2's
+			// own layout-mode loop covers the auto/stacked geometry itself;
+			// this sweep's job is the narrow-interior title ladder.
+			m.layout = layoutWide
+			m.syncPreview()
 			m.focus = focus
 			g := layoutGeom(m.layout, len(m.views), m.width, m.height)
 			innerW := paneInnerWidth(g.PrevW)
@@ -1068,16 +1139,7 @@ func TestPreviewTitleOmitsTheIndicatorAtEveryWidthWhenItFits(t *testing.T) {
 	for _, focus := range []focusArea{focusList, focusPreview} {
 		for w := minTermWidth; w <= 80; w++ {
 			m := New()
-			// Height 30, not the 20 several sibling sweeps use: this test's
-			// premise is "the exchange fits, at every WIDTH" — a concern
-			// orthogonal to height — but below stackBreakpoint the panes now
-			// stack, and a stacked preview's floor gives the exchange as
-			// little as one interior row. A tiny fixture that always fit at
-			// width 40 under the old (always side-by-side) geometry can
-			// overflow that one-row floor at height 20; height 30 keeps the
-			// pane tall enough that this two-line "hi" fixture fits in the
-			// stacked arm too, at every width the loop below sweeps.
-			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+			next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 20})
 			m = next.(Model)
 			next, _ = m.Update(sessionsMsg{views: []session.View{{
 				Session:    session.Session{SessionID: "s0", Status: "idle", Version: "2.1.220"},
@@ -1086,6 +1148,17 @@ func TestPreviewTitleOmitsTheIndicatorAtEveryWidthWhenItFits(t *testing.T) {
 				LastHuman:  "hi",
 			}}})
 			m = next.(Model)
+			// Forced wide, not auto: see TestPreviewTitleKeepsBothAffordancesAtEveryWidth's
+			// comment — below stackBreakpoint auto now stacks (full terminal
+			// width), which both moves this sweep out of the narrow interior
+			// band previewTitle's ladder is written for AND (at height 20,
+			// under the stacked floor) can drop the preview pane or its
+			// exchange budget entirely, defeating this test's own "must FIT"
+			// premise for reasons that have nothing to do with what it's
+			// pinning. Forcing wide restores the original, height-independent
+			// interior band this sweep always exercised.
+			m.layout = layoutWide
+			m.syncPreview()
 			m.focus = focus
 			if m.preview.TotalLineCount() > m.preview.Height {
 				t.Fatalf("width %d: fixture must FIT (%d lines in %d rows)",
@@ -1707,6 +1780,14 @@ func TestErrorPaneStaysInsideItsBorder(t *testing.T) {
 		for _, w := range []int{minTermWidth, 60, 100} {
 			for h := minTermHeight; h <= 30; h++ {
 				m := heightSweepModel(liveSessionCount, w, h)
+				// Forced wide: at width 40/60, heights >= 24 are
+				// comfortable enough for auto to stack (full terminal
+				// width), which would remove this sweep's narrow-interior
+				// coverage of the preview title/metadata for those
+				// heights. See TestPreviewTitleKeepsBothAffordancesAtEveryWidth's
+				// comment for the full reasoning.
+				m.layout = layoutWide
+				m.syncPreview()
 				m.err = err
 				frame := m.View()
 
