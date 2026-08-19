@@ -120,6 +120,20 @@ func (m *Model) syncPreview() {
 		body.WriteString(wrapToWidth(sanitize(v.LastAssistant), inner))
 		m.preview.SetContent(body.String())
 	}
+
+	// A layout flip or a resize can shrink the viewport (fewer rows) or
+	// rewrap the exchange shorter (fewer lines) in the same call that just
+	// changed m.preview.Height and refilled its content above. SetContent's
+	// own clamp only fires when YOffset > len(lines)-1 — NOT when it merely
+	// exceeds the new maxYOffset() — so a YOffset that was valid a moment ago
+	// can be left pointing past the viewport's new bottom: the pane then
+	// shows blank rows below whatever content remains, in the exact moment
+	// the reader just changed the layout (or resized) to look at it.
+	// SetYOffset, unlike SetContent, clamps to maxYOffset() exactly — cheap
+	// insurance that also does nothing when the current offset is still
+	// valid, so a resize that leaves the reader's scroll position intact
+	// does not yank them back to it.
+	m.preview.SetYOffset(m.preview.YOffset)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

@@ -1374,12 +1374,17 @@ func TestPreviewMetadataIsClampedButNotOverClamped(t *testing.T) {
 	}
 }
 
-// TestViewLegendElidesGracefullyWhenItDoesNotFit pins help.Model.Width
-// specifically, which the sweep above cannot: ansi.Truncate alone would satisfy
-// every width assertion there by hard-clipping mid-word. The difference the two
-// produce is visible in the last line — bubbles drops whole bindings and marks
-// the cut with "…", a bare ansi.Truncate ends on whatever character fell on the
-// boundary ("… r refre").
+// TestViewLegendElidesGracefullyWhenItDoesNotFit pins the graceful-cut
+// marker at exactly minTermWidth, which the sweep above cannot (it only pins
+// the raw width bound). view.go's own ansi.Truncate call supplies the "…"
+// now, not bubbles' help.Model — found during Task 2's fix round: bubbles
+// v1.0.0's shouldAddItem (help.go) fails OPEN when a binding doesn't fit AND
+// there is no room left even for ITS OWN ellipsis, returning the FULL,
+// un-elided legend with no truncation marker at all. Reproduced at exactly
+// this width (40) once Task 2's `v` binding pushed the legend's total
+// content past the point where that branch triggers. So this test is not
+// just "does the legend look tidy" — it is the regression net for that
+// specific upstream failure mode, at the one width it was measured to hit.
 func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
 	m := busyFrameModel(minTermWidth, 20, "")
 	lines := strings.Split(visibleText(m.View()), "\n")
@@ -1398,7 +1403,7 @@ func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
 // legend against the layout actually on screen, in both directions.
 //
 // Below previewFits' threshold Tab is a deliberate no-op (see
-// TestTabIsNoOpWhenPreviewNotVisible), so a legend still offering "switch pane"
+// TestTabIsNoOpWhenPreviewNotVisible), so a legend still offering "pane"
 // there names a key that does nothing. The reject half alone would be satisfied
 // by dropping the binding altogether, which is why the accept half is here too.
 //
@@ -1406,11 +1411,11 @@ func TestViewLegendElidesGracefullyWhenItDoesNotFit(t *testing.T) {
 // input is drawn inside renderPreviewMetadata, which View does not call at
 // all below the threshold — so "n rename" there would not name a no-op key,
 // it would name an INVISIBLE modal (see handleKey's Rename case and C2 in the
-// task-1 review). Checked with the SAME want as "switch pane" since both ride
+// task-1 review). Checked with the SAME want as "pane" since both ride
 // shortHelpFor's previewVisible gate.
 //
 // The legend is read at a width where nothing is elided: at minTermWidth
-// bubbles drops trailing bindings for room, and "switch pane" missing because
+// bubbles drops trailing bindings for room, and "pane" missing because
 // the line was too short is a different fact from it being disabled.
 func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) {
 	for _, c := range []struct {
@@ -1428,8 +1433,8 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 		}
 		lines := strings.Split(visibleText(m.View()), "\n")
 		legend := lines[len(lines)-1]
-		if got := strings.Contains(legend, "switch pane"); got != c.want {
-			t.Errorf("height %d: legend advertises \"switch pane\" = %v, want %v (preview visible = %v): %q",
+		if got := strings.Contains(legend, "pane"); got != c.want {
+			t.Errorf("height %d: legend advertises \"pane\" = %v, want %v (preview visible = %v): %q",
 				c.height, got, c.want, c.want, strings.TrimRight(legend, " "))
 		}
 		if got := strings.Contains(legend, "rename"); got != c.want {
@@ -1446,6 +1451,45 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 				t.Errorf("height %d: legend lost %q: %q", c.height, still, strings.TrimRight(legend, " "))
 			}
 		}
+	}
+}
+
+// TestLegendSurvivingBindingsAtWidth80 pins the elided legend's exact
+// surviving set at 80 columns — the canonical terminal width, and the exact
+// width where Task 2's fix-round review measured a regression: before this
+// commit's `keys.go` changes, the full legend needed 90 columns to fit (a
+// `switch pane` label plus the newest `v layout` binding tacked onto the
+// end), so at 80 the elided legend cut off before reaching `q quit` — the
+// EXIT key had become the casualty of a binding addition that never meant to
+// touch it.
+//
+// The fix (shortened `⇥ switch pane` -> `⇥ pane`, and `Quit` moved ahead of
+// `Layout` in ShortHelp — see that function's own doc comment) means `quit`
+// survives at this width again, and `layout` — the newest, most affordable
+// binding — is the one bubbles drops instead. This test is what makes the
+// NEXT binding addition confront that trade-off deliberately: growing
+// ShortHelp's rendered width without touching this test can silently push
+// `quit` back off the edge, exactly as `Layout`'s addition did the first
+// time, undetected until now.
+func TestLegendSurvivingBindingsAtWidth80(t *testing.T) {
+	const width = 80
+	m := heightSweepModel(liveSessionCount, width, 20) // previewVisible: every binding is a candidate
+	if !m.previewVisible() {
+		t.Fatal("fixture must show the preview so no binding is gated off before the width elision even runs")
+	}
+	lines := strings.Split(visibleText(m.View()), "\n")
+	legend := strings.TrimRight(lines[len(lines)-1], " ")
+
+	if !strings.HasSuffix(legend, "…") {
+		t.Fatalf("width %d: legend must still be eliding at this width (fixture assumption), got %q", width, legend)
+	}
+	for _, want := range []string{"up", "down", "pane", "focus tab", "refresh", "rename", "quit"} {
+		if !strings.Contains(legend, want) {
+			t.Errorf("width %d: legend lost %q, want it to survive: %q", width, want, legend)
+		}
+	}
+	if strings.Contains(legend, "layout") {
+		t.Errorf("width %d: legend shows \"layout\" — expected it to be the one binding eliding at this width, got %q", width, legend)
 	}
 }
 

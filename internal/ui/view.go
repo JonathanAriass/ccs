@@ -310,27 +310,41 @@ func (m Model) View() string {
 
 	// Both footer lines are hard-clipped to the terminal width.
 	//
-	// The key legend is 52 display columns at full length, but minTermWidth is
-	// 40 — so at every width in [40, 52) an unclamped legend is WIDER than the
-	// screen. lipgloss.JoinVertical below pads every block to the widest one, so
-	// a 52-column footer does not just overflow itself: it stretches EVERY body
-	// row to 52 columns too, each of which the terminal then wraps onto a second
-	// line, doubling the frame's height and garbling the layout. Measured over
-	// widths 40..80: 12 of 41 overflowed, all of them by up to 12 columns, and
-	// all of them in [40, 52). That range is not hypothetical — it is what a
-	// vertical iTerm2 split or a Neovim :terminal in a side window gives you.
+	// The key legend is now 83 display columns at full length (grows with
+	// every binding), but minTermWidth is 40 — so an unclamped legend is
+	// WIDER than the screen across most of the supported width band.
+	// lipgloss.JoinVertical below pads every block to the widest one, so an
+	// overlong footer does not just overflow itself: it stretches EVERY body
+	// row out to match, each of which the terminal then wraps onto a second
+	// line, doubling the frame's height and garbling the layout.
 	//
-	// h.Width tells bubbles to elide the legend gracefully (with "…") instead of
-	// dropping bindings, but it is NOT sufficient on its own: its truncation is
-	// approximate and still returned 52 columns at Width = 45. ansi.Truncate,
-	// which clips by real display width, is what actually guarantees the bound.
+	// h.Width tells bubbles to elide the legend gracefully (with "…") instead
+	// of dropping bindings, but it is NOT a bound on its own — confirmed two
+	// ways. Its truncation is approximate (still returned a too-wide legend
+	// at some Width values, pre-existing). Worse, measured at Task 2's
+	// fix-round: bubbles' own shouldAddItem (help.go) fails OPEN, not closed,
+	// when a binding doesn't fit AND there isn't even room left for its own
+	// ellipsis marker — it returns ok=true in that branch, so the render loop
+	// keeps appending every remaining binding with no further width check at
+	// all. Reproduced at exactly minTermWidth (40) after Task 2's legend
+	// shortened by 7 columns: h.Width=40 rendered the FULL, un-elided
+	// 8-binding legend, not a truncated one.
+	//
+	// ansi.Truncate is what actually guarantees BOTH properties bubbles is
+	// unreliable for: the real-display-width bound (it clips by measured
+	// column width, not bubbles' approximation), and — passing "…" as its own
+	// tail, rather than "" — the graceful-cut marker, applied AFTER whatever
+	// bubbles produced, elided or not. This makes the marker's presence
+	// depend only on ansi.Truncate's own single, exact width computation
+	// instead of on bubbles' internal one, which is what closes the failure
+	// mode above: even the full un-elided legend gets a correct, marked cut.
 	var footer strings.Builder
 	if m.status != "" {
 		footer.WriteString(ansi.Truncate(statusFooter.Render(sanitize(m.status)), m.width, "") + "\n")
 	}
 	h := help.New()
 	h.Width = m.width
-	footer.WriteString(ansi.Truncate(h.ShortHelpView(m.keys.shortHelpFor(m.previewVisible())), m.width, ""))
+	footer.WriteString(ansi.Truncate(h.ShortHelpView(m.keys.shortHelpFor(m.previewVisible())), m.width, "…"))
 
 	return lipgloss.JoinVertical(lipgloss.Left, body, footer.String())
 }

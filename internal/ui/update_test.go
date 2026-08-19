@@ -1923,3 +1923,176 @@ func TestVDuringRenameTypesInsteadOfCycling(t *testing.T) {
 		t.Errorf("v did not reach the rename field: %q", got)
 	}
 }
+
+// --- Task 2 fix-round Important #4: a stale scroll offset must not survive
+// a layout flip or a resize that shrinks the viewport. syncPreview sets
+// m.preview.Height and refills content on both paths; bubbles' own
+// SetContent only clamps YOffset when it exceeds len(lines)-1, NOT when it
+// merely exceeds the new maxYOffset() (Height - lines), so a deep scroll
+// position from before the shrink can be left pointing at blank rows below
+// the viewport's new bottom. maxYOffset itself is unexported on
+// viewport.Model, so every assertion below derives it the same way the fix
+// does: max(0, TotalLineCount()-Height) — valid because m.preview.Style
+// carries no vertical frame size (TestPreviewViewportStyleHasNoFrameSize
+// pins that separately). ---
+
+// pressJ drives j through Update n times with the preview focused, returning
+// the resulting model. Unlike scrolling to the natural end (LineDown's own
+// clamp at the CURRENT maxYOffset), a bounded, moderate count is deliberate:
+// scrolling all the way to the pre-flip max lands past the shrunk arm's own
+// TOTAL LINE COUNT too, and bubbles' SetContent already special-cases that
+// exact situation (its own clamp fires whenever YOffset > len(lines)-1,
+// calling GotoBottom() — see viewport.go). That pre-existing clamp would
+// then mask the bug this test exists to catch: a YOffset that is still
+// LESS than the new content's total line count, but greater than what the
+// new, shorter Height leaves room to show. Measured at n=20 (2-session
+// fixture, 118x30 flipping to stacked): before=20, new total=26 (still >
+// 20, so SetContent's clamp does not fire), new maxYOffset=15 (< 20, so the
+// height-based clamp is the only thing that can catch it) — the same
+// numbers the review's own reproduction used.
+func pressJ(m Model, n int) Model {
+	m.focus = focusPreview
+	down := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	for i := 0; i < n; i++ {
+		next, _ := m.Update(down)
+		m = next.(Model)
+	}
+	return m
+}
+
+func maxYOffsetOf(m Model) int {
+	return max(0, m.preview.TotalLineCount()-m.preview.Height)
+}
+
+// TestScrollOffsetClampsAfterLayoutFlipShrinksThePreview reproduces the
+// review's exact repro shape at 118x30 (2 sessions): scrolled 20 lines deep
+// (see pressJ's own comment for why 20 and not "all the way"), one v forces
+// stacked, whose narrower body height AND re-wrapped (though WIDER-per-line,
+// since stacked's preview spans the full terminal) exchange land
+// TotalLineCount-Height at a smaller max — asserted generically here (not
+// the literal numbers) so the test survives unrelated arithmetic changes
+// elsewhere, but the fixture's own guard confirms it lands in the specific
+// window described in pressJ's comment: past the new maxYOffset, but NOT
+// past the new TotalLineCount, so SetContent's own clamp cannot be what's
+// doing the work.
+func TestScrollOffsetClampsAfterLayoutFlipShrinksThePreview(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m = pressJ(m, 20)
+	before := m.preview.YOffset
+	beforeTotal := m.preview.TotalLineCount()
+	if before == 0 {
+		t.Fatal("fixture must actually be scrolled before the flip")
+	}
+
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = n.(Model)
+	if m.layout != layoutStacked {
+		t.Fatal("fixture: v must have forced stacked")
+	}
+
+	want := maxYOffsetOf(m)
+	if want >= before {
+		t.Fatalf("fixture does not exercise the clamp: new maxYOffset %d >= pre-flip offset %d", want, before)
+	}
+	if before > m.preview.TotalLineCount()-1 {
+		t.Fatalf("fixture accidentally exercises SetContent's OWN clamp (pre-flip offset %d > new total-1) rather than the height-based one this test targets — pick a shallower scroll depth than %d (pre-flip total was %d)",
+			before, before, beforeTotal)
+	}
+	if m.preview.YOffset != want {
+		t.Errorf("after v flip: YOffset=%d, want %d (the new maxYOffset) — a stale offset from before the flip survived",
+			m.preview.YOffset, want)
+	}
+}
+
+// TestScrollOffsetClampsAfterResizeShrinksThePreview is the plain-resize
+// counterpart: WindowSizeMsg shares syncPreview with the v handler, and a
+// WIDER terminal at the same height can still shrink the exchange's own
+// TotalLineCount enough (fewer, wider wrapped lines) to invalidate a deep
+// offset — no height change or layout flip required. Same 20-line scroll
+// depth and the same SetContent-did-it-not-me guard as the flip test above.
+func TestScrollOffsetClampsAfterResizeShrinksThePreview(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m = pressJ(m, 20)
+	before := m.preview.YOffset
+	beforeTotal := m.preview.TotalLineCount()
+	if before == 0 {
+		t.Fatal("fixture must actually be scrolled before the resize")
+	}
+
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 300, Height: 30})
+	m = n.(Model)
+
+	want := maxYOffsetOf(m)
+	if want >= before {
+		t.Fatalf("fixture does not exercise the clamp: new maxYOffset %d >= pre-resize offset %d", want, before)
+	}
+	if before > m.preview.TotalLineCount()-1 {
+		t.Fatalf("fixture accidentally exercises SetContent's OWN clamp (pre-resize offset %d > new total-1) rather than the height-based one this test targets — pick a shallower scroll depth than %d (pre-resize total was %d)",
+			before, before, beforeTotal)
+	}
+	if m.preview.YOffset != want {
+		t.Errorf("after resize: YOffset=%d, want %d (the new maxYOffset) — a stale offset from before the resize survived",
+			m.preview.YOffset, want)
+	}
+}
+
+// TestScrollOffsetSurvivesLayoutFlipWhenStillValid is the other direction of
+// Important #4: the fix must not regress the common case where the offset
+// is still valid after the flip. SetYOffset(m.preview.YOffset) is a no-op
+// when the current value is already within [0, maxYOffset()], but a cruder
+// fix (e.g. unconditionally calling GotoTop or GotoBottom) would have passed
+// the clamp tests above while yanking a reader who was only partway through
+// the exchange back to the top or bottom every time they pressed v.
+func TestScrollOffsetSurvivesLayoutFlipWhenStillValid(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m.focus = focusPreview
+	for i := 0; i < 5; i++ {
+		n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = n.(Model)
+	}
+	before := m.preview.YOffset
+	if before == 0 {
+		t.Fatal("fixture must actually be scrolled (but not to the max) before the flip")
+	}
+
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = n.(Model)
+	if m.layout != layoutStacked {
+		t.Fatal("fixture: v must have forced stacked")
+	}
+
+	if want := maxYOffsetOf(m); before > want {
+		t.Fatalf("fixture does not exercise the preserve direction: pre-flip offset %d already exceeds the new maxYOffset %d", before, want)
+	}
+	if m.preview.YOffset != before {
+		t.Errorf("after v flip: YOffset=%d, want unchanged at %d — a still-valid scroll position must not be reset",
+			m.preview.YOffset, before)
+	}
+}
+
+// TestScrollOffsetSurvivesResizeWhenStillValid is the resize counterpart: a
+// benign resize (here, simply taller) that only grows headroom must leave a
+// still-valid offset exactly where the reader left it.
+func TestScrollOffsetSurvivesResizeWhenStillValid(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	m.focus = focusPreview
+	for i := 0; i < 5; i++ {
+		n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+		m = n.(Model)
+	}
+	before := m.preview.YOffset
+	if before == 0 {
+		t.Fatal("fixture must actually be scrolled (but not to the max) before the resize")
+	}
+
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 118, Height: 40}) // taller only
+	m = n.(Model)
+
+	if want := maxYOffsetOf(m); before > want {
+		t.Fatalf("fixture does not exercise the preserve direction: pre-resize offset %d already exceeds the new maxYOffset %d", before, want)
+	}
+	if m.preview.YOffset != before {
+		t.Errorf("after resize: YOffset=%d, want unchanged at %d — a still-valid scroll position must not be reset",
+			m.preview.YOffset, before)
+	}
+}

@@ -27,7 +27,7 @@ func defaultKeys() keyMap {
 		),
 		Cycle: key.NewBinding(
 			key.WithKeys("tab"),
-			key.WithHelp("⇥", "switch pane"),
+			key.WithHelp("⇥", "pane"),
 		),
 		Focus: key.NewBinding(
 			key.WithKeys("enter"),
@@ -52,8 +52,18 @@ func defaultKeys() keyMap {
 	}
 }
 
+// Quit comes before Layout deliberately: bubbles' help.ShortHelpView drops
+// TRAILING bindings first when the legend does not fit (see
+// TestViewLegendElidesGracefullyWhenItDoesNotFit), so whichever binding is
+// last is the first one an elided legend loses. Quit is the one binding this
+// program cannot afford to make undiscoverable at a narrow width — losing it
+// silently would leave ctrl+c as the only way out, on the exact terminals
+// (narrow enough to elide) most likely to be a scrollback-limited SSH
+// session. Layout can afford to be that casualty: it degrades to "not
+// advertised" rather than "no visible way to quit", and auto already covers
+// the common narrow case without the user ever needing to reach for `v`.
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Rename, k.Layout, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Rename, k.Quit, k.Layout}
 }
 
 // shortHelpFor is ShortHelp for the layout actually on screen: below the

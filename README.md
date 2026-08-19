@@ -19,11 +19,14 @@ them sorted by urgency: `waiting` first, then `busy`, then `shell`, then
 `idle`. The list re-polls every 2 seconds.
 
 Two panes: sessions and a scrollable preview of the selected session. On a
-wide enough terminal they sit side by side, sessions on the left; below
-`stackBreakpoint` (90 columns) — a vertical iTerm2 split, a Neovim
-`:terminal` side window — they stack instead, sessions on top, both full
-width, since those terminals are usually tall enough to spend the height
-that side-by-side would waste. `v` overrides the automatic choice.
+wide enough terminal they sit side by side, sessions on the left; below 90
+columns — a vertical iTerm2 split, a Neovim `:terminal` side window — they
+stack instead, sessions on top, both full width, since those terminals are
+usually tall enough to spend the height that side-by-side would waste.
+Auto-stacking also needs the terminal to be at least 24 rows tall; below
+that, stacking would leave the preview with no room to show anything useful,
+so side-by-side is kept instead (cramped, but no worse than before this
+feature existed). `v` forces stacking regardless, down to 20 rows.
 
 | Key | Action |
 |-----|--------|
@@ -32,7 +35,7 @@ that side-by-side would waste. `v` overrides the automatic choice.
 | ⏎ | jump iTerm2 to the tab/window/pane owning the selected session |
 | r | refresh immediately |
 | n | rename |
-| v | cycle layout: auto → stacked → side-by-side; auto follows width, breakpoint 90 |
+| v | cycle layout: auto → stacked → side-by-side; auto stacks below 90 columns and at 24+ rows |
 | q | quit |
 
 ⏎, r and q are unaffected by focus — they always act on the selected
