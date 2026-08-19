@@ -18,8 +18,12 @@ filters it down to sessions whose process is still actually alive, and lists
 them sorted by urgency: `waiting` first, then `busy`, then `shell`, then
 `idle`. The list re-polls every 2 seconds.
 
-Two panes: sessions on the left, a scrollable preview of the selected
-session on the right.
+Two panes: sessions and a scrollable preview of the selected session. On a
+wide enough terminal they sit side by side, sessions on the left; below
+`stackBreakpoint` (90 columns) — a vertical iTerm2 split, a Neovim
+`:terminal` side window — they stack instead, sessions on top, both full
+width, since those terminals are usually tall enough to spend the height
+that side-by-side would waste. `v` overrides the automatic choice.
 
 | Key | Action |
 |-----|--------|
@@ -28,6 +32,7 @@ session on the right.
 | ⏎ | jump iTerm2 to the tab/window/pane owning the selected session |
 | r | refresh immediately |
 | n | rename |
+| v | cycle layout: auto → stacked → side-by-side; auto follows width, breakpoint 90 |
 | q | quit |
 
 ⏎, r and q are unaffected by focus — they always act on the selected

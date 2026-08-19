@@ -962,25 +962,34 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 		// real.
 		for _, focus := range []focusArea{focusList, focusPreview} {
 			for w := minTermWidth; w <= 80; w++ {
-				m := busyFrameModel(w, 20, status)
-				m.focus = focus
-				frame := m.View()
+				// Layout mode joins the sweep here (Task 2), same reasoning as
+				// TestFrameStructurallySoundAcrossHeightSweep: auto alone does
+				// not reach the stacked arm at this fixture's fixed height 20
+				// (paneH=18 < stackedComfortHeight), so the forced passes are
+				// what actually exercise it here.
+				for _, mode := range []layoutMode{layoutAuto, layoutStacked, layoutWide} {
+					m := busyFrameModel(w, 20, status)
+					m.focus = focus
+					m.layout = mode
+					m.syncPreview() // geometry changed after the direct field set
+					frame := m.View()
 
-				// Guard against the assertion below passing vacuously on a frame
-				// that rendered nothing at all.
-				lines := strings.Split(frame, "\n")
-				if len(lines) < 10 {
-					t.Fatalf("width %d focus %v (status %q): frame is only %d lines, nothing to measure:\n%s",
-						w, focus, status, len(lines), frame)
-				}
-				if !strings.Contains(visibleText(frame), "Sessions") {
-					t.Fatalf("width %d focus %v (status %q): frame has no session list:\n%s", w, focus, status, frame)
-				}
+					// Guard against the assertion below passing vacuously on a frame
+					// that rendered nothing at all.
+					lines := strings.Split(frame, "\n")
+					if len(lines) < 10 {
+						t.Fatalf("width %d focus %v mode %v (status %q): frame is only %d lines, nothing to measure:\n%s",
+							w, focus, mode, status, len(lines), frame)
+					}
+					if !strings.Contains(visibleText(frame), "Sessions") {
+						t.Fatalf("width %d focus %v mode %v (status %q): frame has no session list:\n%s", w, focus, mode, status, frame)
+					}
 
-				for i, ln := range lines {
-					if got := lipgloss.Width(ln); got > w {
-						t.Fatalf("width %d focus %v (status %q): line %d is %d display columns, want <= %d:\n%q",
-							w, focus, status, i, got, w, visibleText(ln))
+					for i, ln := range lines {
+						if got := lipgloss.Width(ln); got > w {
+							t.Fatalf("width %d focus %v mode %v (status %q): line %d is %d display columns, want <= %d:\n%q",
+								w, focus, mode, status, i, got, w, visibleText(ln))
+						}
 					}
 				}
 			}
@@ -1284,12 +1293,20 @@ func TestPreviewPaneBorderSurvivesEveryWidth(t *testing.T) {
 	for name, build := range fixtures {
 		for _, focus := range []focusArea{focusList, focusPreview} {
 			for w := minTermWidth; w <= 80; w++ {
-				m := build(w, 20)
-				m.focus = focus
-				frame := m.View()
-				if got := strings.Count(frame, "╯"); got != 2 {
-					t.Fatalf("%s, width %d focus %v: frame has %d bottom-right pane corners (╯), want 2 — a pane's bottom border is missing:\n%s",
-						name, w, focus, got, frame)
+				// Layout mode joins the sweep here (Task 2): at this fixture's
+				// fixed height 20, forced stacked sits exactly at the stacked
+				// arm's own bare floor (paneH=18), still shown — the same
+				// pane-count invariant must hold there as in wide/auto.
+				for _, mode := range []layoutMode{layoutAuto, layoutStacked, layoutWide} {
+					m := build(w, 20)
+					m.focus = focus
+					m.layout = mode
+					m.syncPreview() // geometry changed after the direct field set
+					frame := m.View()
+					if got := strings.Count(frame, "╯"); got != 2 {
+						t.Fatalf("%s, width %d focus %v mode %v: frame has %d bottom-right pane corners (╯), want 2 — a pane's bottom border is missing:\n%s",
+							name, w, focus, mode, got, frame)
+					}
 				}
 			}
 		}
@@ -1420,8 +1437,11 @@ func TestLegendAdvertisesSwitchPaneOnlyWhenThereIsAPaneToSwitchTo(t *testing.T) 
 				c.height, got, c.want, c.want, strings.TrimRight(legend, " "))
 		}
 		// The rest of the legend must survive either way — disabling one
-		// binding must not take the others with it.
-		for _, still := range []string{"up", "down", "focus tab", "refresh", "quit"} {
+		// binding must not take the others with it. "layout" belongs here,
+		// not in the accept/reject pair above: v is meaningful in every
+		// layout state (unlike Tab/Rename, which need a visible preview to
+		// act on), so shortHelpFor must never gate it on previewVisible.
+		for _, still := range []string{"up", "down", "focus tab", "refresh", "layout", "quit"} {
 			if !strings.Contains(legend, still) {
 				t.Errorf("height %d: legend lost %q: %q", c.height, still, strings.TrimRight(legend, " "))
 			}
@@ -1721,31 +1741,42 @@ func TestFrameStructurallySoundAcrossHeightSweep(t *testing.T) {
 	for _, n := range []int{1, liveSessionCount} {
 		for _, w := range []int{minTermWidth, 60, 100} {
 			for h := minTermHeight; h <= 30; h++ {
-				for _, focus := range []focusArea{focusList, focusPreview} {
+				// Layout mode joins the sweep here (Task 2): the structural
+				// invariant below must hold in auto, forced-stacked, and
+				// forced-wide alike. Auto already varies its own arm across
+				// this height range at w=60 once paneH crosses
+				// stackedComfortHeight; the explicit stacked/wide passes
+				// additionally force each arm at EVERY width/height in the
+				// sweep, including the ones auto would never choose here.
+				for _, mode := range []layoutMode{layoutAuto, layoutStacked, layoutWide} {
 					m := heightSweepModel(n, w, h)
-					m.focus = focus
-					frame := m.View()
+					m.layout = mode
+					m.syncPreview() // geometry changed after the direct field set
+					for _, focus := range []focusArea{focusList, focusPreview} {
+						m.focus = focus
+						frame := m.View()
 
-					open := strings.Count(frame, "╭")
-					closed := strings.Count(frame, "╯")
-					if open != closed {
-						t.Fatalf("%d sessions, width %d height %d focus %v: %d panes opened (╭) but %d closed (╯) — a pane's bottom border is broken:\n%s",
-							n, w, h, focus, open, closed, frame)
-					}
-					if open == 0 {
-						t.Fatalf("%d sessions, width %d height %d focus %v: frame has no panes at all — nothing to measure:\n%s",
-							n, w, h, focus, frame)
-					}
+						open := strings.Count(frame, "╭")
+						closed := strings.Count(frame, "╯")
+						if open != closed {
+							t.Fatalf("%d sessions, width %d height %d mode %v focus %v: %d panes opened (╭) but %d closed (╯) — a pane's bottom border is broken:\n%s",
+								n, w, h, mode, focus, open, closed, frame)
+						}
+						if open == 0 {
+							t.Fatalf("%d sessions, width %d height %d mode %v focus %v: frame has no panes at all — nothing to measure:\n%s",
+								n, w, h, mode, focus, frame)
+						}
 
-					lines := strings.Split(frame, "\n")
-					if len(lines) > h {
-						t.Fatalf("%d sessions, width %d height %d focus %v: frame is %d lines, want <= %d (the terminal height):\n%s",
-							n, w, h, focus, len(lines), h, frame)
-					}
-					for i, ln := range lines {
-						if got := lipgloss.Width(ln); got > w {
-							t.Fatalf("%d sessions, width %d height %d focus %v: line %d is %d display columns, want <= %d:\n%q",
-								n, w, h, focus, i, got, w, visibleText(ln))
+						lines := strings.Split(frame, "\n")
+						if len(lines) > h {
+							t.Fatalf("%d sessions, width %d height %d mode %v focus %v: frame is %d lines, want <= %d (the terminal height):\n%s",
+								n, w, h, mode, focus, len(lines), h, frame)
+						}
+						for i, ln := range lines {
+							if got := lipgloss.Width(ln); got > w {
+								t.Fatalf("%d sessions, width %d height %d mode %v focus %v: line %d is %d display columns, want <= %d:\n%q",
+									n, w, h, mode, focus, i, got, w, visibleText(ln))
+							}
 						}
 					}
 				}

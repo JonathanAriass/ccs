@@ -11,6 +11,7 @@ type keyMap struct {
 	Focus   key.Binding
 	Refresh key.Binding
 	Rename  key.Binding
+	Layout  key.Binding
 	Quit    key.Binding
 }
 
@@ -40,6 +41,10 @@ func defaultKeys() keyMap {
 			key.WithKeys("n"),
 			key.WithHelp("n", "rename"),
 		),
+		Layout: key.NewBinding(
+			key.WithKeys("v"),
+			key.WithHelp("v", "layout"),
+		),
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
@@ -48,7 +53,7 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Rename, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Cycle, k.Focus, k.Refresh, k.Rename, k.Layout, k.Quit}
 }
 
 // shortHelpFor is ShortHelp for the layout actually on screen: below the
@@ -81,5 +86,5 @@ func (k keyMap) shortHelpFor(previewVisible bool) []key.Binding {
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down}, {k.Cycle, k.Focus, k.Refresh, k.Rename}, {k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down}, {k.Cycle, k.Focus, k.Refresh, k.Rename, k.Layout}, {k.Quit}}
 }

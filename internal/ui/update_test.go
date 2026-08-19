@@ -1834,3 +1834,92 @@ func TestRenameExitsWhenAllSessionsExitMidEdit(t *testing.T) {
 		t.Error("q must quit once every session has exited and closed the rename mode")
 	}
 }
+
+// --- layout: the v cycle (auto -> stacked -> side-by-side -> auto) ---
+
+// TestLayoutCycleIsACycle pins the whole cycle from a known start (the
+// Tab-toggle lesson: assert CHANGE at each step, not merely a post-state that
+// a stuck binding could also produce).
+func TestLayoutCycleIsACycle(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	if m.layout != layoutAuto {
+		t.Fatal("fixture must start in auto")
+	}
+	// Narrow, but NOT comfortable enough for auto to stack on its own
+	// (paneH=18 < stackedComfortHeight=22) — isolates the geometry change
+	// that follows to the v handler itself, not to auto's own width/comfort
+	// stacking (that interaction is TestForcedLayoutSurvivesResizeAutoDoesNot's
+	// job).
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	m = n.(Model)
+	if layoutGeom(m.layout, len(m.views), m.width, m.height).Stacked {
+		t.Fatal("fixture must not already be stacked before any v press")
+	}
+
+	press := func() {
+		n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+		m = n.(Model)
+	}
+	press()
+	if m.layout != layoutStacked || !strings.Contains(m.status, "stacked") {
+		t.Fatalf("1st v: layout=%v status=%q", m.layout, m.status)
+	}
+	// The v handler must resize the viewport itself, right now — not wait for
+	// the next poll or resize. Without its own m.syncPreview() call,
+	// m.preview.Height would still carry whatever the WIDE arm computed a
+	// moment ago even though the frame now renders the STACKED arm's
+	// geometry (a different PrevH at this size — see layoutGeom).
+	g := layoutGeom(m.layout, len(m.views), m.width, m.height)
+	wantHeight := previewBodyHeight(paneInnerHeight(g.PrevH), previewMetadataLines)
+	if m.preview.Height != wantHeight {
+		t.Errorf("after 1st v: preview.Height=%d, want %d (the stacked resolver's value) — syncPreview did not run in the v handler",
+			m.preview.Height, wantHeight)
+	}
+	press()
+	if m.layout != layoutWide || !strings.Contains(m.status, "side-by-side") {
+		t.Fatalf("2nd v: layout=%v status=%q", m.layout, m.status)
+	}
+	press()
+	if m.layout != layoutAuto || !strings.Contains(m.status, "auto") {
+		t.Fatalf("3rd v: layout=%v status=%q — the cycle must return to auto", m.layout, m.status)
+	}
+}
+
+// TestForcedLayoutSurvivesResizeAutoDoesNot pins forced stickiness against
+// auto's own live re-resolution, both directions: auto flips live across the
+// breakpoint on a bare resize, while a forced mode ignores resizes entirely
+// (geometry constraints aside — not exercised by this test).
+func TestForcedLayoutSurvivesResizeAutoDoesNot(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2) // built at 118 wide
+	// auto at 118: side-by-side. Resize to 60: auto stacks.
+	n, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 40})
+	m = n.(Model)
+	if !layoutGeom(m.layout, 2, m.width, m.height).Stacked {
+		t.Fatal("auto at width 60 must stack")
+	}
+	// Force side-by-side, then resize narrower still: must NOT stack.
+	m.layout = layoutWide
+	n, _ = m.Update(tea.WindowSizeMsg{Width: 50, Height: 40})
+	m = n.(Model)
+	if layoutGeom(m.layout, 2, m.width, m.height).Stacked {
+		t.Error("forced side-by-side must survive a resize to width 50")
+	}
+}
+
+// TestVDuringRenameTypesInsteadOfCycling pins the mode-first routing v rides:
+// while renaming, EVERY key including v reaches the input field rather than
+// being interpreted as a binding (handleKey's `if m.renaming` branch returns
+// before the switch that matches m.keys.Layout).
+func TestVDuringRenameTypesInsteadOfCycling(t *testing.T) {
+	m := modelWithOverflowingPreview(t, 2)
+	n, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = n.(Model)
+	n, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	m = n.(Model)
+	if m.layout != layoutAuto {
+		t.Errorf("v during rename cycled the layout to %v", m.layout)
+	}
+	if got := m.nameInput.Value(); !strings.Contains(got, "v") {
+		t.Errorf("v did not reach the rename field: %q", got)
+	}
+}

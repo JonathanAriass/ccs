@@ -345,6 +345,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nameInput.SetValue(m.names[v.SessionID]) // prefill the OVERRIDE, not the auto-name: Enter-on-empty clears
 		m.nameInput.Focus()
 		return m, nil
+
+	case key.Matches(msg, m.keys.Layout):
+		switch m.layout {
+		case layoutAuto:
+			m.layout = layoutStacked
+			m.status = "layout: stacked (forced)"
+		case layoutStacked:
+			m.layout = layoutWide
+			m.status = "layout: side-by-side (forced)"
+		default:
+			m.layout = layoutAuto
+			m.status = "layout: auto"
+		}
+		// Geometry just changed out from under the viewport: resize it now,
+		// not at the next poll. The rename mode cannot be open here (mode-first
+		// routing sends v into the field), so no exit-guard call is needed —
+		// but the guard is cheap insurance if that invariant ever changes.
+		m.syncPreview()
+		m.exitRenameIfInputCannotBeDrawn()
+		return m, nil
 	}
 	return m, nil
 }
